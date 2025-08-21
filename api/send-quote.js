@@ -323,26 +323,32 @@ async function getBrowser() {
   console.log('[send-quote] Using Puppeteer fallback');
   return b2;
 }
-
 // ---------- HTML -> PDF ----------
 async function htmlToPdfBuffer(html) {
-  const browser = await getBrowser();
+  const executablePath = await chromium.executablePath();
+
+  const browser = await pptrCore.launch({
+    args: chromium.args,
+    defaultViewport: chromium.defaultViewport,
+    executablePath,
+    headless: chromium.headless
+  });
 
   try {
     const page = await browser.newPage();
     await page.emulateMediaType('screen');
     await page.setContent(html, { waitUntil: ['networkidle0', 'domcontentloaded'] });
-    await page.waitForTimeout(500);
-    const pdf = await page.pdf({
+    await page.waitForTimeout(400); // give Tailwind a moment
+    return await page.pdf({
       format: 'A4',
       printBackground: true,
       margin: { top: '16mm', right: '14mm', bottom: '16mm', left: '14mm' }
     });
-    return pdf;
   } finally {
     await browser.close();
   }
 }
+
 
 /* ---------------- API handler ---------------- */
 export default async function handler(req, res) {
