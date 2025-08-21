@@ -3,10 +3,14 @@ import { Resend } from 'resend';
 import chromium from '@sparticuz/chromium';
 import puppeteer from 'puppeteer-core';
 
-// ---- Email provider
+// Ensure serverless-friendly headless settings
+chromium.setHeadlessMode = true;
+chromium.setGraphicsMode = false;
+
+// Email provider
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// ---- Company defaults (override via payload.company)
+// ---- Company defaults (override via payload.company) ----
 const COMPANY_DEFAULTS = {
   name: 'VoIP Shop',
   legal: '', // no Darkwire branding
@@ -16,8 +20,9 @@ const COMPANY_DEFAULTS = {
   email: 'sales@voipshop.co.za',
   vatRate: 0.15,
   validityDays: 7,
-  // ⚠️ host your logo at a public HTTPS URL so Chromium can load it
-  logoUrl: 'https://YOUR_DOMAIN/Assets/Group%201642logo%20(1).png'
+  // ⬇️ MUST be a public HTTPS image that opens in a browser
+  // Change if your path differs.
+  logoUrl: 'https://voipshop.co.za/Assets/Group%201642logo%20(1).png'
 };
 
 // ---------- tiny utils ----------
@@ -41,37 +46,48 @@ function withDefaults(input = {}) {
   };
 }
 
-function escapeHtml(s=''){ return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
-function escapeAttr(s=''){ return String(s).replace(/"/g,'&quot;'); }
+function escapeHtml(s = '') {
+  return String(s).replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+}
+function escapeAttr(s = '') {
+  return String(s).replace(/"/g, '&quot;');
+}
 
-// ---------- HTML template (matches your Apple-style quote.html) ----------
+// ---------- HTML template (Apple-style) ----------
 function renderQuoteHTML(q) {
   const d = new Date(q.dateISO);
-  const dateStr  = d.toISOString().slice(0, 10);
+  const dateStr = d.toISOString().slice(0, 10);
   const validStr = new Date(d.getTime() + (q.company.validityDays || 7) * 86400000).toISOString().slice(0, 10);
 
-  const monthlyRows = q.itemsMonthly.map(it => `
+  const monthlyRows = q.itemsMonthly
+    .map(
+      (it) => `
     <tr>
       <td class="p-3 text-gray-700">${escapeHtml(it.name || '')}</td>
       <td class="p-3 text-right text-gray-600">${Number(it.qty || 1)}</td>
       <td class="p-3 text-right font-medium text-gray-900">${zar(it.total || 0)}</td>
-    </tr>`).join('');
+    </tr>`
+    )
+    .join('');
 
-  const onceRows = q.itemsOnceOff.map(it => `
+  const onceRows = q.itemsOnceOff
+    .map(
+      (it) => `
     <tr>
       <td class="p-3 text-gray-700">${escapeHtml(it.name || '')}</td>
       <td class="p-3 text-right text-gray-600">${Number(it.qty || 1)}</td>
       <td class="p-3 text-right font-medium text-gray-900">${zar(it.total || 0)}</td>
-    </tr>`).join('');
+    </tr>`
+    )
+    .join('');
 
   const vatRate = Number(q.company.vatRate ?? 0.15);
   const vatMonthly = (q.subtotals.monthly || 0) * vatRate;
-  const vatOnce    = (q.subtotals.onceOff || 0) * vatRate;
+  const vatOnce = (q.subtotals.onceOff || 0) * vatRate;
 
   const totalMonthly = (q.subtotals.monthly || 0) + vatMonthly;
-  const totalOnce    = (q.subtotals.onceOff || 0) + vatOnce;
-
-  const grandPayNow  = totalOnce + totalMonthly; // first-month payment
+  const totalOnce = (q.subtotals.onceOff || 0) + vatOnce;
+  const grandPayNow = totalOnce + totalMonthly;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -83,14 +99,11 @@ function renderQuoteHTML(q) {
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
   body{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  @media print{
-    .no-print{display:none!important}
-    body{background:#fff!important}
-    .card{box-shadow:none!important}
-  }
+  @media print{ .no-print{display:none!important} body{background:#fff!important} .card{box-shadow:none!important} }
 </style>
 </head>
 <body class="bg-[#F5F5F7] text-gray-900">
+
   <!-- Top controls (hidden in PDF) -->
   <div class="no-print sticky top-0 z-10 bg-[#F5F5F7]/80 backdrop-blur">
     <div class="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-end gap-3">
@@ -103,7 +116,6 @@ function renderQuoteHTML(q) {
     </div>
   </div>
 
-  <!-- Quote wrapper -->
   <main class="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
     <!-- Header -->
     <header class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-6">
@@ -112,7 +124,7 @@ function renderQuoteHTML(q) {
         <div class="text-sm text-gray-500 leading-5">
           <div class="font-medium text-gray-900">${escapeHtml(q.company.name)}</div>
           ${q.company.legal ? `<div>${escapeHtml(q.company.legal)}</div>` : ''}
-          ${q.company.reg   ? `<div>Reg: ${escapeHtml(q.company.reg)}</div>` : ''}
+          ${q.company.reg ? `<div>Reg: ${escapeHtml(q.company.reg)}</div>` : ''}
           <div>${escapeHtml(q.company.address || '')}</div>
           <div>${escapeHtml(q.company.phone || '')} • ${escapeHtml(q.company.email || '')}</div>
         </div>
@@ -121,9 +133,9 @@ function renderQuoteHTML(q) {
       <div class="text-right">
         <h1 class="text-2xl font-semibold tracking-tight">Quote</h1>
         <div class="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-sm text-gray-600">
-          <div class="font-medium text-gray-900">Quote #</div>     <div>${escapeHtml(q.quoteNumber)}</div>
-          <div class="font-medium text-gray-900">Date</div>         <div>${escapeHtml(dateStr)}</div>
-          <div class="font-medium text-gray-900">Valid Until</div>  <div>${escapeHtml(validStr)}</div>
+          <div class="font-medium text-gray-900">Quote #</div><div>${escapeHtml(q.quoteNumber)}</div>
+          <div class="font-medium text-gray-900">Date</div><div>${escapeHtml(dateStr)}</div>
+          <div class="font-medium text-gray-900">Valid Until</div><div>${escapeHtml(validStr)}</div>
         </div>
       </div>
     </header>
@@ -135,8 +147,8 @@ function renderQuoteHTML(q) {
           <div class="text-gray-500">Bill To</div>
           <div class="mt-1 font-medium text-gray-900">${escapeHtml(q.client.name || '')}</div>
           ${q.client.company ? `<div>${escapeHtml(q.client.company)}</div>` : ''}
-          ${q.client.email   ? `<div>${escapeHtml(q.client.email)}</div>`   : ''}
-          ${q.client.phone   ? `<div>${escapeHtml(q.client.phone)}</div>`   : ''}
+          ${q.client.email ? `<div>${escapeHtml(q.client.email)}</div>` : ''}
+          ${q.client.phone ? `<div>${escapeHtml(q.client.phone)}</div>` : ''}
           ${q.client.address ? `<div>${escapeHtml(q.client.address)}</div>` : ''}
         </div>
         <div>
@@ -162,7 +174,7 @@ function renderQuoteHTML(q) {
 
     <!-- Items -->
     <section class="mt-6 grid lg:grid-cols-2 gap-6">
-      <!-- Monthly (recurring) -->
+      <!-- Monthly -->
       <div class="card rounded-2xl border border-gray-200 bg-white p-6 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
         <div class="flex items-center justify-between">
           <h2 class="text-lg font-semibold tracking-tight">Monthly Charges</h2>
@@ -177,21 +189,13 @@ function renderQuoteHTML(q) {
                 <th class="text-right p-3 w-32">Amount</th>
               </tr>
             </thead>
-            <tbody class="divide-y divide-gray-100">${monthlyRows || `
-              <tr><td class="p-3 text-gray-500" colspan="3">No monthly items.</td></tr>`}</tbody>
+            <tbody class="divide-y divide-gray-100">
+              ${monthlyRows || `<tr><td class="p-3 text-gray-500" colspan="3">No monthly items.</td></tr>`}
+            </tbody>
             <tfoot class="bg-gray-50">
-              <tr>
-                <td class="p-3 text-right font-medium" colspan="2">Subtotal</td>
-                <td class="p-3 text-right font-semibold text-gray-900">${zar(q.subtotals.monthly)}</td>
-              </tr>
-              <tr>
-                <td class="p-3 text-right font-medium" colspan="2">VAT (${Math.round(vatRate*100)}%)</td>
-                <td class="p-3 text-right font-semibold text-gray-900">${zar(vatMonthly)}</td>
-              </tr>
-              <tr>
-                <td class="p-3 text-right font-medium" colspan="2">Total / month</td>
-                <td class="p-3 text-right font-extrabold text-gray-900">${zar(totalMonthly)}</td>
-              </tr>
+              <tr><td class="p-3 text-right font-medium" colspan="2">Subtotal</td><td class="p-3 text-right font-semibold text-gray-900">${zar(q.subtotals.monthly)}</td></tr>
+              <tr><td class="p-3 text-right font-medium" colspan="2">VAT (${Math.round(vatRate * 100)}%)</td><td class="p-3 text-right font-semibold text-gray-900">${zar(vatMonthly)}</td></tr>
+              <tr><td class="p-3 text-right font-medium" colspan="2">Total / month</td><td class="p-3 text-right font-extrabold text-gray-900">${zar(totalMonthly)}</td></tr>
             </tfoot>
           </table>
         </div>
@@ -212,21 +216,13 @@ function renderQuoteHTML(q) {
                 <th class="text-right p-3 w-32">Amount</th>
               </tr>
             </thead>
-            <tbody class="divide-y divide-gray-100">${onceRows || `
-              <tr><td class="p-3 text-gray-500" colspan="3">No once-off items.</td></tr>`}</tbody>
+            <tbody class="divide-y divide-gray-100">
+              ${onceRows || `<tr><td class="p-3 text-gray-500" colspan="3">No once-off items.</td></tr>`}
+            </tbody>
             <tfoot class="bg-gray-50">
-              <tr>
-                <td class="p-3 text-right font-medium" colspan="2">Subtotal</td>
-                <td class="p-3 text-right font-semibold text-gray-900">${zar(q.subtotals.onceOff)}</td>
-              </tr>
-              <tr>
-                <td class="p-3 text-right font-medium" colspan="2">VAT (${Math.round(vatRate*100)}%)</td>
-                <td class="p-3 text-right font-semibold text-gray-900">${zar(vatOnce)}</td>
-              </tr>
-              <tr>
-                <td class="p-3 text-right font-medium" colspan="2">Total (once-off)</td>
-                <td class="p-3 text-right font-extrabold text-gray-900">${zar(totalOnce)}</td>
-              </tr>
+              <tr><td class="p-3 text-right font-medium" colspan="2">Subtotal</td><td class="p-3 text-right font-semibold text-gray-900">${zar(q.subtotals.onceOff)}</td></tr>
+              <tr><td class="p-3 text-right font-medium" colspan="2">VAT (${Math.round(vatRate * 100)}%)</td><td class="p-3 text-right font-semibold text-gray-900">${zar(vatOnce)}</td></tr>
+              <tr><td class="p-3 text-right font-medium" colspan="2">Total (once-off)</td><td class="p-3 text-right font-extrabold text-gray-900">${zar(totalOnce)}</td></tr>
             </tfoot>
           </table>
         </div>
@@ -299,19 +295,19 @@ function renderQuoteHTML(q) {
 
 // ---------- HTML -> PDF using headless Chromium ----------
 async function htmlToPdfBuffer(html) {
-  const exePath = await chromium.executablePath();
+  const executablePath = await chromium.executablePath();
   const browser = await puppeteer.launch({
     args: [...chromium.args, '--disable-web-security'],
     defaultViewport: { width: 1280, height: 800, deviceScaleFactor: 2 },
-    executablePath: exePath,
-    headless: chromium.headless,
+    executablePath,
+    headless: chromium.headless
   });
 
   try {
     const page = await browser.newPage();
+    await page.emulateMediaType('screen');
     await page.setContent(html, { waitUntil: ['networkidle0', 'domcontentloaded'] });
-    // Give Tailwind CDN a moment to load its CSS
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(400); // allow Tailwind CDN to finish
     const pdf = await page.pdf({
       format: 'A4',
       printBackground: true,
@@ -329,32 +325,32 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST')     return res.status(405).send('Method Not Allowed');
+  if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
 
   try {
     const q = withDefaults(req.body || {});
     if (!q?.client?.email) return res.status(400).send('Missing client email.');
 
-    // 1) Build HTML
+    // Build HTML + render PDF
     const html = renderQuoteHTML(q);
-
-    // 2) Render PDF
     const pdfBuffer = await htmlToPdfBuffer(html);
 
-    // 3) Email via Resend
+    // Email via Resend
     const result = await resend.emails.send({
-      from: 'sales@voipshop.co.za',            // must be verified in Resend
+      from: 'sales@voipshop.co.za', // must be a verified sender in Resend
       to: q.client.email,
       reply_to: 'sales@voipshop.co.za',
       subject: `VoIP Shop Quote • ${q.quoteNumber}`,
       html: `<p>Hi ${escapeHtml(q.client.name || '')},</p>
              <p>Please find your quote attached.</p>
              <p>Regards,<br/>VoIP Shop</p>`,
-      attachments: [{
-        filename: `Quote-${q.quoteNumber}.pdf`,
-        content: pdfBuffer.toString('base64'),
-        contentType: 'application/pdf'
-      }]
+      attachments: [
+        {
+          filename: `Quote-${q.quoteNumber}.pdf`,
+          content: pdfBuffer.toString('base64'),
+          contentType: 'application/pdf'
+        }
+      ]
     });
 
     console.log('send-quote OK', { id: result?.id, to: q.client.email, quoteNumber: q.quoteNumber });
