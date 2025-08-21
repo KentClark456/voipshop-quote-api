@@ -296,11 +296,15 @@ function renderQuoteHTML(q) {
 // ---------- HTML -> PDF using headless Chromium ----------
 async function htmlToPdfBuffer(html) {
   const executablePath = await chromium.executablePath();
+
   const browser = await puppeteer.launch({
-    args: [...chromium.args, '--disable-web-security'],
+    args: [
+      ...chromium.args,
+      '--disable-web-security'
+    ],
     defaultViewport: { width: 1280, height: 800, deviceScaleFactor: 2 },
     executablePath,
-    headless: chromium.headless
+    headless: chromium.headless // true on Vercel / serverless
   });
 
   try {
@@ -335,11 +339,11 @@ export default async function handler(req, res) {
     const html = renderQuoteHTML(q);
     const pdfBuffer = await htmlToPdfBuffer(html);
 
-    // Email via Resend
-    const result = await resend.emails.send({
+    // Email via Resend (handle SDK response properly)
+    const { data, error } = await resend.emails.send({
       from: 'sales@voipshop.co.za', // must be a verified sender in Resend
       to: q.client.email,
-      reply_to: 'sales@voipshop.co.za',
+      reply_to: 'sales@voipshop.co.za', // Node SDK accepts snake_case per API; keep as-is
       subject: `VoIP Shop Quote • ${q.quoteNumber}`,
       html: `<p>Hi ${escapeHtml(q.client.name || '')},</p>
              <p>Please find your quote attached.</p>
@@ -347,16 +351,26 @@ export default async function handler(req, res) {
       attachments: [
         {
           filename: `Quote-${q.quoteNumber}.pdf`,
+          // Resend accepts Base64 content; keep as base64 for safety across runtimes
           content: pdfBuffer.toString('base64'),
           contentType: 'application/pdf'
         }
       ]
     });
 
-    console.log('send-quote OK', { id: result?.id, to: q.client.email, quoteNumber: q.quoteNumber });
-    res.status(200).json({ ok: true, id: result?.id });
+    if (error) throw error;
+
+    console.log('send-quote OK', {
+      id: data?.id,
+      to: q.client.email,
+      quoteNumber: q.quoteNumber
+    });
+
+    res.status(200).json({ ok: true, id: data?.id });
   } catch (err) {
     console.error('send-quote error', err);
-    res.status(500).send(String(err?.message || err) || 'Failed to send quote.');
+    res
+      .status(500)
+      .send(String(err?.message || err) || 'Failed to send quote.');
   }
 }
