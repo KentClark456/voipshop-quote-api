@@ -1,27 +1,29 @@
 // api/send-quote.js
 import { Resend } from 'resend';
-import chromium from '@sparticuz/chromium';
-import puppeteer from 'puppeteer-core';
 
-// Ensure serverless-friendly headless settings
+// Primary (Lambda-friendly)
+import chromium from '@sparticuz/chromium';
+import pptrCore from 'puppeteer-core';
+
+// Optional fallback (bundled Chromium). Will be dynamically imported only if needed.
+// import puppeteer from 'puppeteer'; <-- we import this lazily below
+
+// ---- Serverless-friendly defaults (safe even outside Lambda) ----
 chromium.setHeadlessMode = true;
 chromium.setGraphicsMode = false;
 
-// Email provider
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 // ---- Company defaults (override via payload.company) ----
 const COMPANY_DEFAULTS = {
   name: 'VoIP Shop',
-  legal: '', // no Darkwire branding
+  legal: '',
   reg: '',
   address: '23 Lombardy Road, Broadacres, Johannesburg',
   phone: '+27 68 351 0074',
   email: 'sales@voipshop.co.za',
   vatRate: 0.15,
   validityDays: 7,
-  // ⬇️ MUST be a public HTTPS image that opens in a browser
-  // Change if your path differs.
   logoUrl: 'https://voipshop.co.za/Assets/Group%201642logo%20(1).png'
 };
 
@@ -53,33 +55,25 @@ function escapeAttr(s = '') {
   return String(s).replace(/"/g, '&quot;');
 }
 
-// ---------- HTML template (Apple-style) ----------
+// ---------- HTML template ----------
 function renderQuoteHTML(q) {
   const d = new Date(q.dateISO);
   const dateStr = d.toISOString().slice(0, 10);
   const validStr = new Date(d.getTime() + (q.company.validityDays || 7) * 86400000).toISOString().slice(0, 10);
 
-  const monthlyRows = q.itemsMonthly
-    .map(
-      (it) => `
+  const monthlyRows = q.itemsMonthly.map((it) => `
     <tr>
       <td class="p-3 text-gray-700">${escapeHtml(it.name || '')}</td>
       <td class="p-3 text-right text-gray-600">${Number(it.qty || 1)}</td>
       <td class="p-3 text-right font-medium text-gray-900">${zar(it.total || 0)}</td>
-    </tr>`
-    )
-    .join('');
+    </tr>`).join('');
 
-  const onceRows = q.itemsOnceOff
-    .map(
-      (it) => `
+  const onceRows = q.itemsOnceOff.map((it) => `
     <tr>
       <td class="p-3 text-gray-700">${escapeHtml(it.name || '')}</td>
       <td class="p-3 text-right text-gray-600">${Number(it.qty || 1)}</td>
       <td class="p-3 text-right font-medium text-gray-900">${zar(it.total || 0)}</td>
-    </tr>`
-    )
-    .join('');
+    </tr>`).join('');
 
   const vatRate = Number(q.company.vatRate ?? 0.15);
   const vatMonthly = (q.subtotals.monthly || 0) * vatRate;
@@ -103,8 +97,6 @@ function renderQuoteHTML(q) {
 </style>
 </head>
 <body class="bg-[#F5F5F7] text-gray-900">
-
-  <!-- Top controls (hidden in PDF) -->
   <div class="no-print sticky top-0 z-10 bg-[#F5F5F7]/80 backdrop-blur">
     <div class="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-end gap-3">
       <a href="mailto:${escapeAttr(q.company.email)}" class="inline-flex items-center rounded-full border border-gray-300 bg-white px-4 py-2 text-sm font-semibold hover:bg-gray-50">
@@ -117,7 +109,6 @@ function renderQuoteHTML(q) {
   </div>
 
   <main class="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
-    <!-- Header -->
     <header class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-6">
       <div class="flex items-center gap-3">
         <img src="${escapeAttr(q.company.logoUrl)}" alt="${escapeAttr(q.company.name)}" class="h-10 w-auto object-contain">
@@ -129,7 +120,6 @@ function renderQuoteHTML(q) {
           <div>${escapeHtml(q.company.phone || '')} • ${escapeHtml(q.company.email || '')}</div>
         </div>
       </div>
-
       <div class="text-right">
         <h1 class="text-2xl font-semibold tracking-tight">Quote</h1>
         <div class="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-sm text-gray-600">
@@ -140,7 +130,6 @@ function renderQuoteHTML(q) {
       </div>
     </header>
 
-    <!-- Client block -->
     <section class="mt-8 card rounded-2xl border border-gray-200 bg-white p-6 shadow-[0_10px_30px_rgba(0,0,0,0.06)]">
       <div class="grid sm:grid-cols-2 gap-6 text-sm">
         <div>
@@ -158,7 +147,6 @@ function renderQuoteHTML(q) {
       </div>
     </section>
 
-    <!-- Summary pills -->
     <section class="mt-6 flex flex-wrap items-center gap-3">
       <div class="inline-flex items-baseline gap-2 rounded-full border border-gray-200 bg-gray-50 px-4 py-2">
         <span class="text-[11px] uppercase tracking-widest text-gray-500">Monthly</span>
@@ -172,9 +160,7 @@ function renderQuoteHTML(q) {
       </div>
     </section>
 
-    <!-- Items -->
     <section class="mt-6 grid lg:grid-cols-2 gap-6">
-      <!-- Monthly -->
       <div class="card rounded-2xl border border-gray-200 bg-white p-6 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
         <div class="flex items-center justify-between">
           <h2 class="text-lg font-semibold tracking-tight">Monthly Charges</h2>
@@ -201,7 +187,6 @@ function renderQuoteHTML(q) {
         </div>
       </div>
 
-      <!-- Once-off -->
       <div class="card rounded-2xl border border-gray-200 bg-white p-6 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
         <div class="flex items-center justify-between">
           <h2 class="text-lg font-semibold tracking-tight">Once-off Charges</h2>
@@ -229,7 +214,6 @@ function renderQuoteHTML(q) {
       </div>
     </section>
 
-    <!-- Included / value adds + Totals card -->
     <section class="mt-8 grid lg:grid-cols-12 gap-6">
       <div class="lg:col-span-7 card rounded-2xl border border-gray-200 bg-white p-6 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
         <h3 class="text-lg font-semibold tracking-tight">Included with your PBX</h3>
@@ -284,7 +268,6 @@ function renderQuoteHTML(q) {
       </div>
     </section>
 
-    <!-- Footer / Legal -->
     <footer class="mt-8 text-xs text-gray-500">
       <p>This quote is valid for ${q.company.validityDays} days. Stock subject to availability. Pricing in ZAR.</p>
     </footer>
@@ -293,25 +276,63 @@ function renderQuoteHTML(q) {
 </html>`;
 }
 
-// ---------- HTML -> PDF using headless Chromium ----------
-async function htmlToPdfBuffer(html) {
-  const executablePath = await chromium.executablePath();
-
-  const browser = await puppeteer.launch({
-    args: [
-      ...chromium.args,
-      '--disable-web-security'
-    ],
+/* ---------- LAUNCH HELPERS ---------- */
+async function launchLambdaChromium() {
+  const executablePath = await chromium.executablePath(); // null locally; path on Lambda/Vercel
+  return pptrCore.launch({
+    args: chromium.args,
     defaultViewport: { width: 1280, height: 800, deviceScaleFactor: 2 },
     executablePath,
-    headless: chromium.headless // true on Vercel / serverless
+    headless: chromium.headless
   });
+}
+
+async function launchPuppeteerFallback() {
+  // Try an explicit system Chrome first if provided
+  const systemChrome = process.env.CHROME_PATH || null; // e.g. '/usr/bin/google-chrome-stable'
+  if (systemChrome) {
+    return pptrCore.launch({
+      executablePath: systemChrome,
+      headless: 'new',
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
+  }
+
+  // Otherwise, use puppeteer (non-core) which bundles Chromium
+  const puppeteer = (await import('puppeteer')).default;
+  return puppeteer.launch({
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
+}
+
+async function getBrowser() {
+  const forceFallback = process.env.FORCE_PUPPETEER_FALLBACK === '1';
+
+  if (!forceFallback) {
+    try {
+      const b = await launchLambdaChromium();
+      console.log('[send-quote] Using Lambda Chromium');
+      return b;
+    } catch (err) {
+      console.warn('[send-quote] Lambda Chromium failed, falling back:', String(err));
+    }
+  }
+
+  const b2 = await launchPuppeteerFallback();
+  console.log('[send-quote] Using Puppeteer fallback');
+  return b2;
+}
+
+// ---------- HTML -> PDF ----------
+async function htmlToPdfBuffer(html) {
+  const browser = await getBrowser();
 
   try {
     const page = await browser.newPage();
     await page.emulateMediaType('screen');
     await page.setContent(html, { waitUntil: ['networkidle0', 'domcontentloaded'] });
-    await page.waitForTimeout(400); // allow Tailwind CDN to finish
+    await page.waitForTimeout(500);
     const pdf = await page.pdf({
       format: 'A4',
       printBackground: true,
@@ -328,6 +349,7 @@ export default async function handler(req, res) {
   // CORS for browser use
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
 
@@ -335,42 +357,46 @@ export default async function handler(req, res) {
     const q = withDefaults(req.body || {});
     if (!q?.client?.email) return res.status(400).send('Missing client email.');
 
-    // Build HTML + render PDF
     const html = renderQuoteHTML(q);
-    const pdfBuffer = await htmlToPdfBuffer(html);
 
-    // Email via Resend (handle SDK response properly)
+    let pdfBuffer;
+    try {
+      pdfBuffer = await htmlToPdfBuffer(html);
+    } catch (pdfErr) {
+      console.error('[send-quote] PDF render failed:', pdfErr);
+      // Keep going — send the email without attachment so the user still gets something.
+    }
+
     const { data, error } = await resend.emails.send({
-      from: 'sales@voipshop.co.za', // must be a verified sender in Resend
+      from: 'sales@voipshop.co.za',
       to: q.client.email,
-      reply_to: 'sales@voipshop.co.za', // Node SDK accepts snake_case per API; keep as-is
+      reply_to: 'sales@voipshop.co.za',
       subject: `VoIP Shop Quote • ${q.quoteNumber}`,
       html: `<p>Hi ${escapeHtml(q.client.name || '')},</p>
-             <p>Please find your quote attached.</p>
+             <p>Your quote is ${pdfBuffer ? 'attached as a PDF' : 'ready'}.</p>
+             <p>If the PDF is missing, we will resend shortly.</p>
              <p>Regards,<br/>VoIP Shop</p>`,
-      attachments: [
-        {
-          filename: `Quote-${q.quoteNumber}.pdf`,
-          // Resend accepts Base64 content; keep as base64 for safety across runtimes
-          content: pdfBuffer.toString('base64'),
-          contentType: 'application/pdf'
-        }
-      ]
+      attachments: pdfBuffer
+        ? [
+            {
+              filename: `Quote-${q.quoteNumber}.pdf`,
+              content: pdfBuffer.toString('base64'),
+              contentType: 'application/pdf'
+            }
+          ]
+        : undefined
     });
 
     if (error) throw error;
 
-    console.log('send-quote OK', {
+    console.log('send-quote OK', { id: data?.id, to: q.client.email, quoteNumber: q.quoteNumber });
+    res.status(200).json({
+      ok: true,
       id: data?.id,
-      to: q.client.email,
-      quoteNumber: q.quoteNumber
+      usedFallback: Boolean(process.env.FORCE_PUPPETEER_FALLBACK === '1')
     });
-
-    res.status(200).json({ ok: true, id: data?.id });
   } catch (err) {
     console.error('send-quote error', err);
-    res
-      .status(500)
-      .send(String(err?.message || err) || 'Failed to send quote.');
+    res.status(500).send(String(err?.message || err) || 'Failed to send quote.');
   }
 }
