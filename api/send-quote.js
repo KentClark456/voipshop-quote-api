@@ -13,6 +13,9 @@ chromium.setHeadlessMode = true;
 chromium.setGraphicsMode = false;
 
 const resend = new Resend(process.env.RESEND_API_KEY);
+// Ensure Chromium's bundled libs (libnss3.so, etc.) are on the lookup path (Vercel Node runtime)
+process.env.LD_LIBRARY_PATH = `${process.env.LD_LIBRARY_PATH || ''}:/var/task/node_modules/@sparticuz/chromium/lib`;
+
 
 // ---- Company defaults (override via payload.company) ----
 const COMPANY_DEFAULTS = {
