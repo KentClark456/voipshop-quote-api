@@ -1,9 +1,10 @@
 {
   "functions": {
     "api/send-quote.js": {
-      "runtime": "nodejs22.x",
-      "memory": 1024,
-      "maxDuration": 60
+      "runtime": "nodejs20.x",
+      "memory": 1536,
+      "maxDuration": 60,
+      "includeFiles": "node_modules/@sparticuz/chromium/**"
     }
   }
 }
