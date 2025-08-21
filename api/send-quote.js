@@ -29,7 +29,6 @@ function zar(amount) {
 }
 
 function withDefaults(input = {}) {
-  // Merge provided quote with defaults (provided fields win)
   const company = { ...COMPANY_DEFAULTS, ...(input.company || {}) };
   const client = { ...(input.client || {}) };
 
@@ -109,7 +108,7 @@ function generatePdfBuffer(quoteInput) {
          .text(zar(subtotals.monthly || 0), { align: 'right' });
     }
 
-    // Totals (with default VAT fallback)
+    // Totals
     const vatRate = Number(company.vatRate ?? COMPANY_DEFAULTS.vatRate);
     const vatOnce = (subtotals.onceOff || 0) * vatRate;
     const vatMonthly = (subtotals.monthly || 0) * vatRate;
@@ -142,38 +141,71 @@ export default async function handler(req, res) {
   // CORS for browser calls
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
 
   try {
-    const q = withDefaults(req.body || {});
-    if (!q?.client?.email) return res.status(400).send('Missing client email.');
+    const body = req.body || {};
 
-    // Generate PDF using merged defaults
-    const pdf = await generatePdfBuffer(q);
+    // Accept multiple shapes from clients
+    const email =
+      body.toEmail ||
+      body.email ||
+      body?.client?.email;
 
-    // Send email via Resend
-    await resend.emails.send({
-      from: 'sales@voipshop.co.za', // must be verified in Resend
-      to: q.client.email,
+    if (!email) {
+      console.warn('send-quote: missing recipient email');
+      return res.status(400).json({ ok: false, error: 'Missing client email' });
+    }
+
+    // Merge defaults, generate PDF (Buffer)
+    const q = withDefaults(body);
+    const pdfBuffer = await generatePdfBuffer(q);
+
+    // Use a VERIFIED sender address (verify the domain in Resend first!)
+    const from = 'sales@voipshop.co.za';
+
+    // Send email
+    const result = await resend.emails.send({
+      from,
+      to: email,
       subject: `VoIP Shop Quote ${q.quoteNumber ? `• ${q.quoteNumber}` : ''}`,
       html: `<p>Hi ${q.client.name || ''},</p>
              <p>Please find your attached quote from <strong>VoIP Shop</strong>.</p>
              <p>Regards,<br/>VoIP Shop</p>`,
+      text: `Your VoIP Shop quote ${q.quoteNumber || ''} is attached.`,
+      // IMPORTANT: pass Buffer (NOT base64 string)
       attachments: [
         {
           filename: `Quote-${q.quoteNumber || 'VoIP-Shop'}.pdf`,
-          content: pdf.toString('base64'),
+          content: pdfBuffer,                 // <— Buffer
           contentType: 'application/pdf'
         }
-      ]
+      ],
+      // Optional: keep a copy
+      // bcc: 'sales@voipshop.co.za'
     });
 
-    res.status(200).json({ ok: true });
+    console.log('send-quote OK', { id: result?.id, to: email, quoteNumber: q.quoteNumber });
+
+    return res.status(200).json({
+      ok: true,
+      id: result?.id || null,
+      to: email,
+      quoteNumber: q.quoteNumber
+    });
   } catch (e) {
-    console.error(e);
-    res.status(500).send(e.message || 'Failed to send quote.');
+    // Resend commonly returns structured errors; log everything
+    console.error('send-quote ERROR', {
+      name: e?.name,
+      message: e?.message,
+      data: e?.response?.data || e?.data || null
+    });
+    return res.status(500).json({
+      ok: false,
+      error: e?.message || 'Failed to send quote'
+    });
   }
 }
-
