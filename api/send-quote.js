@@ -16,6 +16,43 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 // Ensure Chromium's bundled libs (libnss3.so, etc.) are on the lookup path (Vercel Node runtime)
 process.env.LD_LIBRARY_PATH = `${process.env.LD_LIBRARY_PATH || ''}:/var/task/node_modules/@sparticuz/chromium/lib`;
 
+// --- Diagnostics helpers ---
+import fs from 'node:fs';
+import path from 'node:path';
+
+const LIB_DIR = '/var/task/node_modules/@sparticuz/chromium/lib';
+
+async function diagnostics() {
+  let executablePath = null, execErr = null;
+  try {
+    executablePath = await chromium.executablePath();
+  } catch (e) {
+    execErr = String(e?.message || e);
+  }
+  return {
+    runtime: {
+      node: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      region: process.env.VERCEL_REGION
+    },
+    env: {
+      LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH || ''
+    },
+    chromium: {
+      executablePath,
+      execErr,
+      headless: chromium.headless,
+      defaultViewport: chromium.defaultViewport
+    },
+    libs: {
+      libDir: LIB_DIR,
+      libDirExists: fs.existsSync(LIB_DIR),
+      libnss3Exists: fs.existsSync(path.join(LIB_DIR, 'libnss3.so')),
+      sample: fs.existsSync(LIB_DIR) ? fs.readdirSync(LIB_DIR).slice(0, 20) : []
+    }
+  };
+}
 
 // ---- Company defaults (override via payload.company) ----
 const COMPANY_DEFAULTS = {
@@ -358,8 +395,23 @@ export default async function handler(req, res) {
   // CORS for browser use
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+
+  // Preflight
   if (req.method === 'OPTIONS') return res.status(200).end();
+
+  // Diagnostics: GET -> return environment + chromium lib info
+  if (req.method === 'GET') {
+    try {
+      const info = await diagnostics();
+      return res.status(200).json(info);
+    } catch (e) {
+      console.error('[send-quote] diagnostics error', e);
+      return res.status(500).json({ error: String(e?.message || e) });
+    }
+  }
+
+  // Only POST beyond this point
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
 
   try {
@@ -373,7 +425,7 @@ export default async function handler(req, res) {
       pdfBuffer = await htmlToPdfBuffer(html);
     } catch (pdfErr) {
       console.error('[send-quote] PDF render failed:', pdfErr);
-      // Keep going — send the email without attachment so the user still gets something.
+      // Continue without attachment so the email still goes out
     }
 
     const { data, error } = await resend.emails.send({
@@ -409,3 +461,4 @@ export default async function handler(req, res) {
     res.status(500).send(String(err?.message || err) || 'Failed to send quote.');
   }
 }
+
