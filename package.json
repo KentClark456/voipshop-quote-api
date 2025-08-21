@@ -1,10 +1,11 @@
 {
   "name": "voipshop-quote-api",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@sparticuz/chromium": "^123.0.1",
-    "puppeteer-core": "^22.13.1",
-    "resend": "^3.3.0"
+    "@sparticuz/chromium": "123.0.1",
+    "puppeteer-core": "22.6.0",
+    "resend": "3.3.0"
   }
 }
