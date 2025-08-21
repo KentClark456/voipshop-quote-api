@@ -413,7 +413,15 @@ export default async function handler(req, res) {
 
   // Only POST beyond this point
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
-
+  // Diagnostics via POST (no GET needed)
+if (req.body && req.body.__diag) {
+  try {
+    const info = await diagnostics();
+    return res.status(200).json(info);
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+}
   try {
     const q = withDefaults(req.body || {});
     if (!q?.client?.email) return res.status(400).send('Missing client email.');
