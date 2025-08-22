@@ -1,7 +1,7 @@
 {
   "functions": {
     "api/**/*.js": {
-      "runtime": "nodejs20.x",
+      "runtime": "nodejs22.x",
       "memory": 1536,
       "maxDuration": 60,
       "includeFiles": "node_modules/@sparticuz/chromium/**"
