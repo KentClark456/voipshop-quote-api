@@ -1,9 +1,9 @@
 {
   "functions": {
-    "api/send-quote.js": {
-     "runtime": "@vercel/node@2.15.10",
-      "memory": 1024,
-      "maxDuration": 60
+    "api/**/*.js": {
+      "memory": 1536,
+      "maxDuration": 60,
+      "includeFiles": "node_modules/@sparticuz/chromium/**"
     }
   }
 }
