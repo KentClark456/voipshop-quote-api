@@ -1,81 +1,33 @@
 // api/send-quote.js
 import { Resend } from 'resend';
-
-// Primary (Lambda-friendly)
-import chromium from '@sparticuz/chromium';
-import pptrCore from 'puppeteer-core';
-
-// Optional fallback (bundled Chromium). Will be dynamically imported only if needed.
-// import puppeteer from 'puppeteer'; <-- we import this lazily below
-
-// ---- Serverless-friendly defaults (safe even outside Lambda) ----
-chromium.setHeadlessMode = true;
-chromium.setGraphicsMode = false;
+import { put } from '@vercel/blob';            // Only used if delivery === 'link' or USE_BLOB_LINK=1
+import PDFDocument from 'pdfkit';
+import fetch from 'node-fetch';                // Node 18+ has global fetch, but this keeps it explicit
 
 const resend = new Resend(process.env.RESEND_API_KEY);
-// Ensure Chromium's bundled libs (libnss3.so, etc.) are on the lookup path (Vercel Node runtime)
-process.env.LD_LIBRARY_PATH = `${process.env.LD_LIBRARY_PATH || ''}:/var/task/node_modules/@sparticuz/chromium/lib`;
-
-// --- Diagnostics helpers ---
-import fs from 'node:fs';
-import path from 'node:path';
-
-const LIB_DIR = '/var/task/node_modules/@sparticuz/chromium/lib';
-
-async function diagnostics() {
-  let executablePath = null, execErr = null;
-  try {
-    executablePath = await chromium.executablePath();
-  } catch (e) {
-    execErr = String(e?.message || e);
-  }
-  return {
-    runtime: {
-      node: process.version,
-      platform: process.platform,
-      arch: process.arch,
-      region: process.env.VERCEL_REGION
-    },
-    env: {
-      LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH || ''
-    },
-    chromium: {
-      executablePath,
-      execErr,
-      headless: chromium.headless,
-      defaultViewport: chromium.defaultViewport
-    },
-    libs: {
-      libDir: LIB_DIR,
-      libDirExists: fs.existsSync(LIB_DIR),
-      libnss3Exists: fs.existsSync(path.join(LIB_DIR, 'libnss3.so')),
-      sample: fs.existsSync(LIB_DIR) ? fs.readdirSync(LIB_DIR).slice(0, 20) : []
-    }
-  };
-}
 
 // ---- Company defaults (override via payload.company) ----
 const COMPANY_DEFAULTS = {
   name: 'VoIP Shop',
-  legal: '',
-  reg: '',
   address: '23 Lombardy Road, Broadacres, Johannesburg',
   phone: '+27 68 351 0074',
   email: 'sales@voipshop.co.za',
   vatRate: 0.15,
   validityDays: 7,
+  // Must be a public HTTPS URL for the server to fetch the image
   logoUrl: 'https://voipshop.co.za/Assets/Group%201642logo%20(1).png'
 };
 
-// ---------- tiny utils ----------
-const zar = (n) =>
+// ---- Utilities ----
+const money = (n) =>
   'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 function withDefaults(input = {}) {
   const company = { ...COMPANY_DEFAULTS, ...(input.company || {}) };
   return {
     quoteNumber: input.quoteNumber || 'Q-' + Date.now(),
-    dateISO: input.dateISO || new Date().toISOString(),
+    dateISO: input.dateISO || new Date().toISOString().slice(0, 10),
+    validDays: Number(company.validityDays || 7),
     client: { ...(input.client || {}) },
     itemsOnceOff: Array.isArray(input.itemsOnceOff) ? input.itemsOnceOff : [],
     itemsMonthly: Array.isArray(input.itemsMonthly) ? input.itemsMonthly : [],
@@ -83,390 +35,304 @@ function withDefaults(input = {}) {
       onceOff: Number(input?.subtotals?.onceOff || 0),
       monthly: Number(input?.subtotals?.monthly || 0)
     },
-    notes: input.notes || '',
+    notes: input.notes || 'PBX system configuration and number setup.',
     company
   };
 }
 
 function escapeHtml(s = '') {
-  return String(s).replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
-}
-function escapeAttr(s = '') {
-  return String(s).replace(/"/g, '&quot;');
+  return String(s).replace(/[&<>"']/g, (m) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
 }
 
-// ---------- HTML template ----------
-function renderQuoteHTML(q) {
-  const d = new Date(q.dateISO);
-  const dateStr = d.toISOString().slice(0, 10);
-  const validStr = new Date(d.getTime() + (q.company.validityDays || 7) * 86400000).toISOString().slice(0, 10);
+// ---- PDF builder (styled, matching your checkout sections) ----
+async function buildQuotePdfBuffer(q) {
+  const doc = new PDFDocument({ size: 'A4', margin: 40 });
+  const chunks = [];
+  doc.on('data', (c) => chunks.push(c));
+  const done = new Promise((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
 
-  const monthlyRows = q.itemsMonthly.map((it) => `
-    <tr>
-      <td class="p-3 text-gray-700">${escapeHtml(it.name || '')}</td>
-      <td class="p-3 text-right text-gray-600">${Number(it.qty || 1)}</td>
-      <td class="p-3 text-right font-medium text-gray-900">${zar(it.total || 0)}</td>
-    </tr>`).join('');
-
-  const onceRows = q.itemsOnceOff.map((it) => `
-    <tr>
-      <td class="p-3 text-gray-700">${escapeHtml(it.name || '')}</td>
-      <td class="p-3 text-right text-gray-600">${Number(it.qty || 1)}</td>
-      <td class="p-3 text-right font-medium text-gray-900">${zar(it.total || 0)}</td>
-    </tr>`).join('');
-
-  const vatRate = Number(q.company.vatRate ?? 0.15);
-  const vatMonthly = (q.subtotals.monthly || 0) * vatRate;
-  const vatOnce = (q.subtotals.onceOff || 0) * vatRate;
-
-  const totalMonthly = (q.subtotals.monthly || 0) + vatMonthly;
-  const totalOnce = (q.subtotals.onceOff || 0) + vatOnce;
-  const grandPayNow = totalOnce + totalMonthly;
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Quote | ${escapeHtml(q.company.name)}</title>
-<link rel="icon" type="image/png" href="${escapeAttr(q.company.logoUrl)}"/>
-<script src="https://cdn.tailwindcss.com"></script>
-<style>
-  body{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  @media print{ .no-print{display:none!important} body{background:#fff!important} .card{box-shadow:none!important} }
-</style>
-</head>
-<body class="bg-[#F5F5F7] text-gray-900">
-  <div class="no-print sticky top-0 z-10 bg-[#F5F5F7]/80 backdrop-blur">
-    <div class="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-end gap-3">
-      <a href="mailto:${escapeAttr(q.company.email)}" class="inline-flex items-center rounded-full border border-gray-300 bg-white px-4 py-2 text-sm font-semibold hover:bg-gray-50">
-        Accept Quote
-      </a>
-      <button onclick="window.print()" class="inline-flex items-center rounded-full bg-[#0071E3] px-4 py-2 text-sm font-semibold text-white hover:bg-[#0066CC]">
-        Print / Save PDF
-      </button>
-    </div>
-  </div>
-
-  <main class="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
-    <header class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-6">
-      <div class="flex items-center gap-3">
-        <img src="${escapeAttr(q.company.logoUrl)}" alt="${escapeAttr(q.company.name)}" class="h-10 w-auto object-contain">
-        <div class="text-sm text-gray-500 leading-5">
-          <div class="font-medium text-gray-900">${escapeHtml(q.company.name)}</div>
-          ${q.company.legal ? `<div>${escapeHtml(q.company.legal)}</div>` : ''}
-          ${q.company.reg ? `<div>Reg: ${escapeHtml(q.company.reg)}</div>` : ''}
-          <div>${escapeHtml(q.company.address || '')}</div>
-          <div>${escapeHtml(q.company.phone || '')} • ${escapeHtml(q.company.email || '')}</div>
-        </div>
-      </div>
-      <div class="text-right">
-        <h1 class="text-2xl font-semibold tracking-tight">Quote</h1>
-        <div class="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-sm text-gray-600">
-          <div class="font-medium text-gray-900">Quote #</div><div>${escapeHtml(q.quoteNumber)}</div>
-          <div class="font-medium text-gray-900">Date</div><div>${escapeHtml(dateStr)}</div>
-          <div class="font-medium text-gray-900">Valid Until</div><div>${escapeHtml(validStr)}</div>
-        </div>
-      </div>
-    </header>
-
-    <section class="mt-8 card rounded-2xl border border-gray-200 bg-white p-6 shadow-[0_10px_30px_rgba(0,0,0,0.06)]">
-      <div class="grid sm:grid-cols-2 gap-6 text-sm">
-        <div>
-          <div class="text-gray-500">Bill To</div>
-          <div class="mt-1 font-medium text-gray-900">${escapeHtml(q.client.name || '')}</div>
-          ${q.client.company ? `<div>${escapeHtml(q.client.company)}</div>` : ''}
-          ${q.client.email ? `<div>${escapeHtml(q.client.email)}</div>` : ''}
-          ${q.client.phone ? `<div>${escapeHtml(q.client.phone)}</div>` : ''}
-          ${q.client.address ? `<div>${escapeHtml(q.client.address)}</div>` : ''}
-        </div>
-        <div>
-          <div class="text-gray-500">Project / Notes</div>
-          <div class="mt-1 text-gray-700">${escapeHtml(q.notes || 'PBX system configuration and number setup.')}</div>
-        </div>
-      </div>
-    </section>
-
-    <section class="mt-6 flex flex-wrap items-center gap-3">
-      <div class="inline-flex items-baseline gap-2 rounded-full border border-gray-200 bg-gray-50 px-4 py-2">
-        <span class="text-[11px] uppercase tracking-widest text-gray-500">Monthly</span>
-        <span class="text-xl font-semibold text-gray-900">${zar(totalMonthly)}</span>
-        <span class="text-gray-500">/mo</span>
-      </div>
-      <div class="inline-flex items-baseline gap-2 rounded-full border border-gray-200 bg-gray-50 px-4 py-2">
-        <span class="text-[11px] uppercase tracking-widest text-gray-500">Once-off</span>
-        <span class="text-xl font-semibold text-gray-900">${zar(totalOnce)}</span>
-        <span class="text-gray-500">setup</span>
-      </div>
-    </section>
-
-    <section class="mt-6 grid lg:grid-cols-2 gap-6">
-      <div class="card rounded-2xl border border-gray-200 bg-white p-6 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-        <div class="flex items-center justify-between">
-          <h2 class="text-lg font-semibold tracking-tight">Monthly Charges</h2>
-          <span class="text-sm text-gray-500">Billed monthly</span>
-        </div>
-        <div class="mt-4 overflow-hidden rounded-xl border border-gray-100">
-          <table class="w-full text-sm">
-            <thead class="bg-gray-50 text-gray-500">
-              <tr>
-                <th class="text-left p-3">Description</th>
-                <th class="text-right p-3 w-28">Qty</th>
-                <th class="text-right p-3 w-32">Amount</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-100">
-              ${monthlyRows || `<tr><td class="p-3 text-gray-500" colspan="3">No monthly items.</td></tr>`}
-            </tbody>
-            <tfoot class="bg-gray-50">
-              <tr><td class="p-3 text-right font-medium" colspan="2">Subtotal</td><td class="p-3 text-right font-semibold text-gray-900">${zar(q.subtotals.monthly)}</td></tr>
-              <tr><td class="p-3 text-right font-medium" colspan="2">VAT (${Math.round(vatRate * 100)}%)</td><td class="p-3 text-right font-semibold text-gray-900">${zar(vatMonthly)}</td></tr>
-              <tr><td class="p-3 text-right font-medium" colspan="2">Total / month</td><td class="p-3 text-right font-extrabold text-gray-900">${zar(totalMonthly)}</td></tr>
-            </tfoot>
-          </table>
-        </div>
-      </div>
-
-      <div class="card rounded-2xl border border-gray-200 bg-white p-6 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-        <div class="flex items-center justify-between">
-          <h2 class="text-lg font-semibold tracking-tight">Once-off Charges</h2>
-          <span class="text-sm text-gray-500">Setup & hardware</span>
-        </div>
-        <div class="mt-4 overflow-hidden rounded-xl border border-gray-100">
-          <table class="w-full text-sm">
-            <thead class="bg-gray-50 text-gray-500">
-              <tr>
-                <th class="text-left p-3">Description</th>
-                <th class="text-right p-3 w-28">Qty</th>
-                <th class="text-right p-3 w-32">Amount</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-100">
-              ${onceRows || `<tr><td class="p-3 text-gray-500" colspan="3">No once-off items.</td></tr>`}
-            </tbody>
-            <tfoot class="bg-gray-50">
-              <tr><td class="p-3 text-right font-medium" colspan="2">Subtotal</td><td class="p-3 text-right font-semibold text-gray-900">${zar(q.subtotals.onceOff)}</td></tr>
-              <tr><td class="p-3 text-right font-medium" colspan="2">VAT (${Math.round(vatRate * 100)}%)</td><td class="p-3 text-right font-semibold text-gray-900">${zar(vatOnce)}</td></tr>
-              <tr><td class="p-3 text-right font-medium" colspan="2">Total (once-off)</td><td class="p-3 text-right font-extrabold text-gray-900">${zar(totalOnce)}</td></tr>
-            </tfoot>
-          </table>
-        </div>
-      </div>
-    </section>
-
-    <section class="mt-8 grid lg:grid-cols-12 gap-6">
-      <div class="lg:col-span-7 card rounded-2xl border border-gray-200 bg-white p-6 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-        <h3 class="text-lg font-semibold tracking-tight">Included with your PBX</h3>
-        <ul class="mt-4 grid sm:grid-cols-2 gap-3 text-sm">
-          <li class="flex items-start gap-2">
-            <span class="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#E7F0FF] text-[#0B63E6]">
-              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </span>
-            <span class="text-gray-700">Professional install & device setup</span>
-          </li>
-          <li class="flex items-start gap-2">
-            <span class="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#E7F0FF] text-[#0B63E6]">
-              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="currentColor" stroke-width="2"/></svg>
-            </span>
-            <span class="text-gray-700">Remote support included</span>
-          </li>
-          <li class="flex items-start gap-2">
-            <span class="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#E7F0FF] text-[#0B63E6]">
-              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="currentColor" stroke-width="2"/></svg>
-            </span>
-            <span class="text-gray-700">Number porting assistance</span>
-          </li>
-          <li class="flex items-start gap-2">
-            <span class="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#E7F0FF] text-[#0B63E6]">
-              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4 10-10" stroke="currentColor" stroke-width="2"/></svg>
-            </span>
-            <span class="text-gray-700">Core PBX features (transfer, voicemail, IVR, recording)</span>
-          </li>
-        </ul>
-      </div>
-
-      <div class="lg:col-span-5 card rounded-2xl border border-gray-200 bg-white p-6 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-        <h3 class="text-lg font-semibold tracking-tight">Totals</h3>
-        <div class="mt-4 space-y-2 text-sm">
-          <div class="flex items-center justify-between">
-            <span class="text-gray-600">Monthly total</span>
-            <span class="font-semibold text-gray-900">${zar(totalMonthly)}</span>
-          </div>
-          <div class="flex items-center justify-between">
-            <span class="text-gray-600">Once-off total</span>
-            <span class="font-semibold text-gray-900">${zar(totalOnce)}</span>
-          </div>
-          <hr class="my-3 border-gray-200">
-          <div class="flex items-center justify-between">
-            <span class="text-[1.05rem] font-semibold text-gray-900">Pay now (incl VAT)</span>
-            <span class="text-[1.15rem] font-extrabold text-gray-900">${zar(grandPayNow)}</span>
-          </div>
-          <p class="mt-3 text-gray-600">
-            Payment terms: once-off on installation; monthly fees billed in advance.
-          </p>
-        </div>
-      </div>
-    </section>
-
-    <footer class="mt-8 text-xs text-gray-500">
-      <p>This quote is valid for ${q.company.validityDays} days. Stock subject to availability. Pricing in ZAR.</p>
-    </footer>
-  </main>
-</body>
-</html>`;
-}
-
-/* ---------- LAUNCH HELPERS ---------- */
-async function launchLambdaChromium() {
-  const executablePath = await chromium.executablePath(); // null locally; path on Lambda/Vercel
-  return pptrCore.launch({
-    args: chromium.args,
-    defaultViewport: { width: 1280, height: 800, deviceScaleFactor: 2 },
-    executablePath,
-    headless: chromium.headless
-  });
-}
-
-async function launchPuppeteerFallback() {
-  // Try an explicit system Chrome first if provided
-  const systemChrome = process.env.CHROME_PATH || null; // e.g. '/usr/bin/google-chrome-stable'
-  if (systemChrome) {
-    return pptrCore.launch({
-      executablePath: systemChrome,
-      headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
-  }
-
-  // Otherwise, use puppeteer (non-core) which bundles Chromium
-  const puppeteer = (await import('puppeteer')).default;
-  return puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  });
-}
-
-async function getBrowser() {
-  const forceFallback = process.env.FORCE_PUPPETEER_FALLBACK === '1';
-
-  if (!forceFallback) {
-    try {
-      const b = await launchLambdaChromium();
-      console.log('[send-quote] Using Lambda Chromium');
-      return b;
-    } catch (err) {
-      console.warn('[send-quote] Lambda Chromium failed, falling back:', String(err));
-    }
-  }
-
-  const b2 = await launchPuppeteerFallback();
-  console.log('[send-quote] Using Puppeteer fallback');
-  return b2;
-}
-// ---------- HTML -> PDF ----------
-async function htmlToPdfBuffer(html) {
-  const executablePath = await chromium.executablePath();
-
-  const browser = await pptrCore.launch({
-    args: chromium.args,
-    defaultViewport: chromium.defaultViewport,
-    executablePath,
-    headless: chromium.headless
-  });
-
+  // Try fetch logo (non-blocking)
+  let logoBuf = null;
   try {
-    const page = await browser.newPage();
-    await page.emulateMediaType('screen');
-    await page.setContent(html, { waitUntil: ['networkidle0', 'domcontentloaded'] });
-    await page.waitForTimeout(400); // give Tailwind a moment
-    return await page.pdf({
-      format: 'A4',
-      printBackground: true,
-      margin: { top: '16mm', right: '14mm', bottom: '16mm', left: '14mm' }
-    });
-  } finally {
-    await browser.close();
+    if (q.company.logoUrl) {
+      const r = await fetch(q.company.logoUrl, { cache: 'no-store' });
+      if (r.ok) logoBuf = Buffer.from(await r.arrayBuffer());
+    }
+  } catch {}
+
+  // Colors
+  const gray500 = '#6b7280';
+  const border = '#e5e7eb';
+  const band = '#f3f4f6';
+  const thbg = '#f9fafb';
+
+  // Header
+  if (logoBuf) {
+    try { doc.image(logoBuf, 40, 40, { width: 120 }); } catch {}
   }
+
+  doc.font('Helvetica-Bold').fontSize(20).text('Quote', 0, 40, { align: 'right' });
+  doc.font('Helvetica').fontSize(10)
+     .text(`Quote #: ${q.quoteNumber}`, { align: 'right' })
+     .text(`Date: ${q.dateISO}`, { align: 'right' })
+     .text(`Valid: ${q.validDays} days`, { align: 'right' });
+
+  // Company & Client blocks
+  doc.moveDown(2);
+  doc.font('Helvetica-Bold').fontSize(12).text(q.company.name);
+  doc.font('Helvetica').fontSize(10)
+     .text(q.company.address)
+     .text(`${q.company.phone} • ${q.company.email}`);
+
+  doc.moveDown(1.2);
+  doc.font('Helvetica-Bold').fontSize(11).text('Bill To');
+  doc.font('Helvetica').fontSize(10)
+     .text(q.client.name || '')
+     .text(q.client.company || '')
+     .text(q.client.email || '')
+     .text(q.client.phone || '')
+     .text(q.client.address || '');
+
+  // Totals pills
+  const vat = Number(q.company.vatRate ?? 0.15);
+  const onceSub = Number(q.subtotals.onceOff || 0);
+  const monSub = Number(q.subtotals.monthly || 0);
+  const onceVat = onceSub * vat;
+  const monVat = monSub * vat;
+  const onceTotal = onceSub + onceVat;
+  const monTotal = monSub + monVat;
+  const grandPayNow = onceTotal + monTotal;
+
+  const yStartPills = doc.y + 14;
+  doc.roundedRect(40, yStartPills, 230, 26, 6).strokeColor(border).stroke();
+  doc.font('Helvetica').fontSize(9).fillColor(gray500).text('MONTHLY', 48, yStartPills + 6);
+  doc.font('Helvetica-Bold').fontSize(12).fillColor('black').text(`${money(monTotal)} `, 48, yStartPills + 14);
+  doc.font('Helvetica').fontSize(9).fillColor(gray500).text('/month', 140, yStartPills + 16);
+
+  doc.roundedRect(300, yStartPills, 230, 26, 6).strokeColor(border).stroke();
+  doc.font('Helvetica').fontSize(9).fillColor(gray500).text('ONCE-OFF', 308, yStartPills + 6);
+  doc.font('Helvetica-Bold').fontSize(12).fillColor('black').text(`${money(onceTotal)} `, 308, yStartPills + 14);
+  doc.font('Helvetica').fontSize(9).fillColor(gray500).text('setup', 410, yStartPills + 16);
+  doc.fillColor('black');
+
+  doc.moveDown(3);
+
+  // Table helper
+  function table(title, items, subtotalEx, vatAmt, totalInc, monthly=false) {
+    const pageW = doc.page.width;
+    const left = doc.page.margins.left;
+    const right = pageW - doc.page.margins.right;
+    const width = right - left;
+    const colW = [ width * 0.58, width * 0.12, width * 0.12, width * 0.18 ];
+    let y = doc.y;
+
+    // Title
+    doc.font('Helvetica-Bold').fontSize(12).text(title, left, y);
+    y = doc.y + 6;
+
+    // Header background
+    doc.save()
+       .rect(left, y, width, 18)
+       .fill(thbg)
+       .restore();
+
+    doc.font('Helvetica-Bold').fontSize(10);
+    doc.text('Description', left + 6, y + 4, { width: colW[0] - 8 });
+    doc.text('Qty', left + colW[0], y + 4, { width: colW[1], align: 'right' });
+    doc.text('Unit', left + colW[0] + colW[1], y + 4, { width: colW[2], align: 'right' });
+    doc.text('Amount', left + colW[0] + colW[1] + colW[2], y + 4, { width: colW[3], align: 'right' });
+
+    // Header bottom border
+    doc.moveTo(left, y + 18).lineTo(right, y + 18).strokeColor(border).stroke();
+    y += 22;
+
+    doc.font('Helvetica').fontSize(10).fillColor('black');
+
+    // Rows
+    if (!items.length) {
+      doc.text('No items.', left + 6, y);
+      y = doc.y + 6;
+    } else {
+      for (const it of items) {
+        const qty = Number(it.qty || 1);
+        const unit = Number(it.unit ?? it.price ?? it.total ?? 0); // allow flexible naming
+        const amount = unit * qty;
+
+        // Row border (grid feel)
+        doc.moveTo(left, y).lineTo(right, y).strokeColor(border).stroke();
+
+        doc.text(String(it.name || ''), left + 6, y + 6, { width: colW[0] - 8 });
+        doc.text(String(qty), left + colW[0], y + 6, { width: colW[1], align: 'right' });
+        doc.text(money(unit), left + colW[0] + colW[1], y + 6, { width: colW[2], align: 'right' });
+        doc.text(money(amount), left + colW[0] + colW[1] + colW[2], y + 6, { width: colW[3], align: 'right' });
+
+        y += 24;
+
+        // Page break safety
+        if (y > doc.page.height - 180) {
+          doc.addPage();
+          y = doc.y;
+        }
+      }
+    }
+
+    // Footer lines
+    doc.moveTo(left, y).lineTo(right, y).strokeColor(border).stroke();
+    y += 8;
+
+    const labelW = 120;
+    const valW = 90;
+    const valX = right - valW;
+    const labelX = valX - labelW - 6;
+
+    const line = (label, val) => {
+      doc.font('Helvetica').fontSize(10).fillColor('black')
+         .text(label, labelX, y, { width: labelW, align: 'right' });
+      doc.font('Helvetica-Bold').text(money(val), valX, y, { width: valW, align: 'right' });
+      y += 16;
+    };
+
+    line('Subtotal', subtotalEx);
+    line(`VAT (${Math.round(vat * 100)}%)`, vatAmt);
+    line(monthly ? 'Total / month' : 'Total (once-off)', totalInc);
+
+    doc.y = y + 4;
+  }
+
+  // Once-off section (hardware & setup)
+  table('Once-off Charges', q.itemsOnceOff, onceSub, onceVat, onceTotal, false);
+  doc.moveDown(0.8);
+
+  // Monthly section (service)
+  table('Monthly Charges', q.itemsMonthly, monSub, monVat, monTotal, true);
+  doc.moveDown(1);
+
+  // Grand total band
+  const left = doc.page.margins.left;
+  const right = doc.page.width - doc.page.margins.right;
+  const width = right - left;
+  const yBand = doc.y + 4;
+
+  doc.save().rect(left, yBand, width, 28).fill(band).restore();
+  doc.rect(left, yBand, width, 28).strokeColor(border).stroke();
+  doc.font('Helvetica-Bold').fontSize(12)
+     .text('Pay now (incl VAT)', left + 10, yBand + 8);
+  doc.text(money(grandPayNow), left, yBand + 8, { width, align: 'right' });
+
+  doc.moveDown(3);
+
+  // Included services + call-out fee
+  doc.font('Helvetica').fontSize(9).fillColor(gray500)
+     .text('Included: Professional install & device setup; Remote support; PBX configuration; Number porting assistance. Standard call-out fee: R450.');
+  doc.moveDown(0.6);
+  doc.text(`Notes: ${q.notes}`);
+  doc.moveDown(0.6);
+  doc.text(`This quote is valid for ${q.validDays} days. Pricing in ZAR.`);
+
+  doc.end();
+  return done;
 }
 
+// ---- Email HTML builders ----
+function emailBodyWithLink({ brand, clientName, monthlyInclVat, pdfUrl }) {
+  return `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial;color:#111;max-width:560px;margin:0 auto;padding:24px;">
+      <div style="text-align:center;margin-bottom:16px;">
+        ${brand.logoUrl ? `<img src="${brand.logoUrl}" alt="${escapeHtml(brand.name)}" style="height:36px;">` : ''}
+      </div>
+      <p>Hi ${escapeHtml(clientName || '')},</p>
+      <p>Your quote is ready. Your estimated <strong>monthly bill is ${money(monthlyInclVat)}</strong>.</p>
+      <p>Click below to download your full PDF quote:</p>
+      <p style="text-align:center;margin:24px 0;">
+        <a href="${pdfUrl}" style="background:#111;color:#fff;padding:12px 18px;border-radius:10px;text-decoration:none;display:inline-block;">
+          Download Quote (PDF)
+        </a>
+      </p>
+      <p>Just reply if you have any questions.</p>
+      <p>— ${escapeHtml(brand.name)} Team</p>
+    </div>`;
+}
 
-/* ---------------- API handler ---------------- */
+function emailBodyTiny({ brand, clientName, monthlyInclVat }) {
+  return `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial;color:#111;max-width:560px;margin:0 auto;padding:24px;">
+      <div style="text-align:center;margin-bottom:16px;">
+        ${brand.logoUrl ? `<img src="${brand.logoUrl}" alt="${escapeHtml(brand.name)}" style="height:36px;">` : ''}
+      </div>
+      <p>Hi ${escapeHtml(clientName || '')},</p>
+      <p>Your quote is ready. Your estimated <strong>monthly bill is ${money(monthlyInclVat)}</strong>.</p>
+      <p>The PDF is attached for your records.</p>
+      <p>— ${escapeHtml(brand.name)} Team</p>
+    </div>`;
+}
+
+// ---------------- API handler ----------------
 export default async function handler(req, res) {
   // CORS for browser use
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-
-  // Preflight
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
-
-  // Diagnostics: GET -> return environment + chromium lib info
-  if (req.method === 'GET') {
-    try {
-      const info = await diagnostics();
-      return res.status(200).json(info);
-    } catch (e) {
-      console.error('[send-quote] diagnostics error', e);
-      return res.status(500).json({ error: String(e?.message || e) });
-    }
-  }
-
-  // Only POST beyond this point
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
-  // Diagnostics via POST (no GET needed)
-if (req.body && req.body.__diag) {
+
   try {
-    const info = await diagnostics();
-    return res.status(200).json(info);
-  } catch (e) {
-    return res.status(500).json({ error: String(e?.message || e) });
-  }
-}
-  try {
-    const q = withDefaults(req.body || {});
+    const body = req.body || {};
+    const q = withDefaults(body);
+    const delivery = (body.delivery || '').toLowerCase() || (process.env.USE_BLOB_LINK ? 'link' : 'attach');
+
     if (!q?.client?.email) return res.status(400).send('Missing client email.');
 
-    const html = renderQuoteHTML(q);
+    // 1) Generate PDF (fast)
+    const pdfBuffer = await buildQuotePdfBuffer(q);
 
-    let pdfBuffer;
-    try {
-      pdfBuffer = await htmlToPdfBuffer(html);
-    } catch (pdfErr) {
-      console.error('[send-quote] PDF render failed:', pdfErr);
-      // Continue without attachment so the email still goes out
+    // 2) Prepare email fields
+    const from = 'sales@voipshop.co.za';
+    const to = q.client.email;
+    const subject = `VoIP Shop Quote • ${q.quoteNumber}`;
+    const vat = Number(q.company.vatRate ?? 0.15);
+    const monthlyInclVat = Number(q.subtotals.monthly || 0) * (1 + vat);
+
+    if (delivery === 'link') {
+      // 3a) Upload to Blob and email a link
+      if (!process.env.BLOB_READ_WRITE_TOKEN) {
+        return res.status(500).send('BLOB_READ_WRITE_TOKEN not set for link delivery.');
+      }
+      const keyPart = String(q.quoteNumber).replace(/[^\w\-]+/g, '-');
+      const objectPath = `quotes/${new Date().toISOString().slice(0,10)}/quote-${keyPart}.pdf`;
+
+      const { url: pdfUrl } = await put(objectPath, pdfBuffer, {
+        access: 'public',
+        token: process.env.BLOB_READ_WRITE_TOKEN,
+        contentType: 'application/pdf',
+        addRandomSuffix: false
+      });
+
+      const { error } = await resend.emails.send({
+        from, to, reply_to: from, subject,
+        html: emailBodyWithLink({ brand: q.company, clientName: q.client.name, monthlyInclVat, pdfUrl })
+      });
+      if (error) throw error;
+
+      return res.status(200).json({ ok: true, delivery: 'link', pdfUrl });
+    } else {
+      // 3b) Attach directly (fastest path)
+      const { error, data } = await resend.emails.send({
+        from, to, reply_to: from, subject,
+        html: emailBodyTiny({ brand: q.company, clientName: q.client.name, monthlyInclVat }),
+        attachments: [
+          {
+            filename: `Quote-${q.quoteNumber}.pdf`,
+            content: pdfBuffer.toString('base64'),
+            contentType: 'application/pdf'
+          }
+        ]
+      });
+      if (error) throw error;
+
+      return res.status(200).json({ ok: true, delivery: 'attach', id: data?.id });
     }
-
-    const { data, error } = await resend.emails.send({
-      from: 'sales@voipshop.co.za',
-      to: q.client.email,
-      reply_to: 'sales@voipshop.co.za',
-      subject: `VoIP Shop Quote • ${q.quoteNumber}`,
-      html: `<p>Hi ${escapeHtml(q.client.name || '')},</p>
-             <p>Your quote is ${pdfBuffer ? 'attached as a PDF' : 'ready'}.</p>
-             <p>If the PDF is missing, we will resend shortly.</p>
-             <p>Regards,<br/>VoIP Shop</p>`,
-      attachments: pdfBuffer
-        ? [
-            {
-              filename: `Quote-${q.quoteNumber}.pdf`,
-              content: pdfBuffer.toString('base64'),
-              contentType: 'application/pdf'
-            }
-          ]
-        : undefined
-    });
-
-    if (error) throw error;
-
-    console.log('send-quote OK', { id: data?.id, to: q.client.email, quoteNumber: q.quoteNumber });
-    res.status(200).json({
-      ok: true,
-      id: data?.id,
-      usedFallback: Boolean(process.env.FORCE_PUPPETEER_FALLBACK === '1')
-    });
   } catch (err) {
     console.error('send-quote error', err);
-    res.status(500).send(String(err?.message || err) || 'Failed to send quote.');
+    return res.status(500).send(String(err?.message || err) || 'Failed to create/send quote.');
   }
 }
-
