@@ -393,10 +393,20 @@ async function buildPortingPdfBuffer({ company, client, port }) {
 
 /* ============================ HANDLER ============================ */
 export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // --- Robust CORS (works from http://127.0.0.1:5500, etc.) ---
+  const origin = req.headers.origin || '*';
+  const acrh   = req.headers['access-control-request-headers'] || '';
+
+  res.setHeader('Vary', 'Origin, Access-Control-Request-Headers');
+  res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  res.setHeader('Access-Control-Allow-Headers', acrh || 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Max-Age', '86400'); // cache preflight
+
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end(); // preflight OK, no body
+  }
+
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
 
   try {
