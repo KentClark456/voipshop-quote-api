@@ -13,9 +13,6 @@ const __dirname = path.dirname(__filename);
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// Force Node runtime (gives global fetch, Node 20 features)
-export const config = { runtime: 'nodejs20.x' };
-
 // ---- Company defaults (override via payload.company) ----
 const COMPANY_DEFAULTS = {
   name: 'VoIP Shop',
