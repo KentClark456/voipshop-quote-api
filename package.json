@@ -1,12 +1,17 @@
 {
-  "name": "voipshop-quote-api",
-  "version": "1.0.0",
-  "private": true,
+  "name": "voipshopv3",
+  "version": "0.3.0",
+  "description": "Telecommunications store",
+  "main": "index.js",
   "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
-    "pdfkit": "^0.15.0",
-    "resend": "3.3.0",
-    "@vercel/blob": "^0.19.0",
+    "cors": "^2.8.5",
+    "dotenv": "^8.2.0",
+    "express": "^4.17.1",
+    "pdfkit": "^0.13.0",
     "node-fetch": "^3.3.2"
   }
 }

@@ -224,54 +224,193 @@ async function buildInvoicePdfBuffer(inv) {
   doc.end();
   return done;
 }
+// services/buildSlaPdfBuffer.js
+const PDFDocument = require('pdfkit');
+const { fetchBuffer, drawBrandHeader } = require('../utils/pdf-branding');
 
-/* ===================== SLA (PDFKit) ===================== */
-/* Compact SLA based on your “What happens next / SLA” summary used on your site. */
-async function buildSlaPdfBuffer({ company }) {
-  const doc = new PDFDocument({ size: 'A4', margin: 42 });
+/**
+ * Build a dense, 1-page SLA PDF.
+ * @param {{
+ *   company: {
+ *     name?: string, legal?: string, reg?: string, vat?: string,
+ *     address?: string, phone?: string, email?: string, website?: string,
+ *     logoUrl?: string
+ *   },
+ *   customer: {
+ *     name?: string, contact?: string, email?: string, phone?: string,
+ *     address?: string, reg?: string, vat?: string
+ *   },
+ *   slaNumber?: string,  // e.g. "SLA-2025-000123"
+ *   effectiveDateISO?: string, // e.g. 2025-08-24
+ *   noticeDays?: number, // default 30
+ *   monthlyExVat?: number,       // auto-fill from checkout
+ *   monthlyInclVat?: number,     // auto-fill from checkout
+ *   vatRate?: number,            // default 0.15
+ *   serviceDescription?: string, // short line shown in Fee Summary
+ * }} params
+ * @returns {Promise<Buffer>}
+ */
+async function buildSlaPdfBuffer(params) {
+  const {
+    company = {},
+    customer = {},
+    slaNumber = `SLA-${new Date().toISOString().slice(0,10).replace(/-/g,'')}`,
+    effectiveDateISO = new Date().toISOString().slice(0,10),
+    noticeDays = 30,
+    monthlyExVat = 0,
+    monthlyInclVat = 0,
+    vatRate = 0.15,
+    serviceDescription = 'Hosted PBX service with number porting, device provisioning, remote support'
+  } = params;
+
+  const doc = new PDFDocument({ size: 'A4', margin: 36 }); // tight margin to fit
   const chunks = [];
   doc.on('data', (c) => chunks.push(c));
   const done = new Promise((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
 
-  const logoBuf = company?.logoUrl ? await fetchBuffer(company.logoUrl) : null;
-  if (logoBuf) { try { doc.image(logoBuf, 42, 42, { width: 110 }); } catch {} }
-  doc.font('Helvetica-Bold').fontSize(18).text('Service Level Agreement (SLA)', 0, 42, { align: 'right' });
+  // Branding
+  let logoBuf = null;
+  if (company?.logoUrl) {
+    try { logoBuf = await fetchBuffer(company.logoUrl); } catch {}
+  }
+  drawBrandHeader(doc, company, logoBuf);
+  doc.on('pageAdded', () => drawBrandHeader(doc, company, logoBuf)); // repeat header automatically
 
-  let y = 84;
-  doc.moveTo(42, y).lineTo(553, y).strokeColor('#d1d5db').stroke(); y += 12;
+  // Content helpers
+  const left = 42;
+  const right = doc.page.width - 42;
+  let y = 72; // below header
 
-  doc.font('Helvetica-Bold').fontSize(12).text(company?.name || 'VoIP Shop', 42, y);
-  doc.font('Helvetica').fontSize(10).fillColor('#4b5563');
-  if (company?.legal) doc.text(company.legal, 42, y + 16);
-  if (company?.reg)   doc.text(`Reg: ${company.reg}`, 42, y + 32);
-  if (company?.address) doc.text(company.address, 42, y + 48);
-  doc.text(`${company?.phone || ''} • ${company?.email || ''}`, 42, y + 64);
-  doc.fillColor('black'); y += 86;
+  const h = (t) => { doc.font('Helvetica-Bold').fontSize(11).text(t, left, y, { width: right - left }); y = doc.y + 6; };
+  const p = (txt, opts = {}) => {
+    doc.font('Helvetica').fontSize(8.5).fillColor('#374151');
+    doc.text(txt, left, y, { width: right - left, lineGap: 1.2, ...opts });
+    y = doc.y + 6;
+    doc.fillColor('black');
+  };
+  const bullet = (txt) => {
+    doc.font('Helvetica').fontSize(8.5).fillColor('#374151');
+    const bx = left + 10;
+    doc.circle(left + 3.5, y + 4.5, 1.5).fill('#6b7280').fillColor('#374151');
+    doc.text(txt, bx, y, { width: right - bx, lineGap: 1.1 });
+    y = doc.y + 3.5;
+    doc.fillColor('black');
+  };
+  const rule = () => { doc.moveTo(left, y).lineTo(right, y).strokeColor('#e5e7eb').lineWidth(1).stroke(); y += 8; };
 
-  const p = (txt) => { doc.font('Helvetica').fontSize(10).fillColor('#4b5563').text(txt, 42, y, { width: 511, lineGap: 2 }); y = doc.y + 10; doc.fillColor('black'); };
-  const h = (t) => { doc.font('Helvetica-Bold').fontSize(12).text(t, 42, y); y += 14; };
+  // Title & SLA meta
+  doc.font('Helvetica-Bold').fontSize(16).text('Service Level Agreement (SLA)', left, y, { align: 'left' });
+  doc.font('Helvetica').fontSize(9).fillColor('#6b7280').text(`Agreement No: ${slaNumber}    •    Effective: ${effectiveDateISO}`, left, y + 20);
+  doc.fillColor('black'); y += 36; rule();
 
-  h('Support Hours & Channels');
+  // Parties
+  h('Parties');
+  p(`${company?.name || 'VoIP Shop'} (“Provider”), ${company?.reg ? 'Reg: ' + company.reg + ', ' : ''}${company?.vat ? 'VAT: ' + company.vat + ', ' : ''}${company?.address || ''}.`);
+  p(`${customer?.name || 'Customer'} (“Customer”), ${customer?.reg ? 'Reg: ' + customer.reg + ', ' : ''}${customer?.vat ? 'VAT: ' + customer.vat + ', ' : ''}${customer?.address || ''}.`);
+  rule();
+
+  // Scope of Service
+  h('Scope of Service');
+  bullet('Hosted PBX platform (SIP), DIDs and number porting, device provisioning, and remote support.');
+  bullet('Inbound/outbound calling via Provider’s carrier partners (fair use and lawful usage apply).');
+  bullet('Optional: onsite services, cabling, training, after-hours work (billable at then-current rates).');
+  rule();
+
+  // Service Levels (Response / Target Restore)
+  h('Service Levels (Response & Target Restore)');
   p('Business hours: Mon–Fri 08:30–17:00 SAST. Support via WhatsApp +27 71 005 7691 and email sales@voipshop.co.za.');
+  bullet('P1 outage (complete service loss): response within 1 hour; target restore within 8 hours.');
+  bullet('P2 major impairment (degraded quality/multiple users): response within 4 hours; target restore within 1 business day.');
+  bullet('P3 minor / Moves, Adds & Changes (MAC): response within 1 business day; target 2–3 business days.');
+  bullet('Onsite: next business day (metro) or by arrangement; travel/after-hours rates may apply.');
+  rule();
 
-  h('Response & Target Restore');
-  p('P1 outage: response 1h, target restore 8h. P2 major: response 4h, target 1 day. P3 minor/MAC: response 1 day, target 2–3 days. Onsite next business day (metro) or by arrangement.');
-
-  h('Scope');
-  p('Hosted PBX, numbers & porting, device provisioning, remote support. Onsite work, cabling, training are billable (R450 per visit; travel/after-hours may apply).');
-
+  // Customer Duties
   h('Customer Duties');
-  p('Provide stable internet, power, and LAN; grant access; ensure lawful use and compliance for call recording.');
+  bullet('Provide stable internet access, power, and LAN with suitable QoS; secure access for Provider when required.');
+  bullet('Ensure lawful use of services; obtain consent where call recording/monitoring is enabled.');
+  bullet('Designate authorised contacts for changes; review and approve porting forms and numbering plans.');
+  rule();
 
-  h('Billing & Term');
-  p('Month-to-month; either party may cancel with 30 days’ notice. Monthly recurring fees; once-off setup/hardware; debit order or EFT. Non-payment may trigger suspension after notice.');
+  // Fees & Billing (auto-filled)
+  const ex = Number.isFinite(monthlyExVat) ? monthlyExVat : 0;
+  const inc = Number.isFinite(monthlyInclVat) ? monthlyInclVat : Math.round(ex * (1 + vatRate) * 100) / 100;
+  h('Fees & Billing');
+  p(`Monthly Service Fee (auto-filled from checkout for this Customer): R ${ex.toFixed(2)} (ex VAT), R ${inc.toFixed(2)} (incl VAT).`);
+  bullet(`Service: ${serviceDescription}.`);
+  bullet('Charges: once-off setup/hardware as quoted; monthly recurring fees billed in advance; call usage billed in arrears (if applicable).');
+  bullet('Payment: debit order or EFT by due date on invoice. Non-payment may lead to suspension after notice.');
+  bullet(`Term: month-to-month; either party may cancel with ${noticeDays} days’ written notice.`);
+  rule();
 
-  h('Liability & Law');
-  p('No indirect damages; cap equals the lesser of 3 months’ service fees or R100,000 (to the extent permitted). South African law; venue Johannesburg.');
+  // Availability, Maintenance, Force Majeure
+  h('Availability, Maintenance, Force Majeure');
+  bullet('Provider will use commercially reasonable efforts to maintain service availability. Some downtime may occur due to carrier outages or scheduled maintenance.');
+  bullet('Maintenance windows will be communicated in advance where practicable.');
+  bullet('Provider is not responsible for failures caused by Customer’s ISP, LAN, power, or third-party carriers, or force majeure events.');
+  rule();
 
+  // Data Protection & Privacy
+  h('Data Protection & Privacy');
+  bullet('Provider processes Customer data solely to deliver services and as required by law.');
+  bullet('Call recordings (if enabled) are retained per Customer policy; Customer is responsible for retention periods and disclosures.');
+  bullet('Customer must not store unlawful content or contravene POPIA or other applicable laws.');
+  rule();
+
+  // Warranties, Liability, Indemnity
+  h('Warranties, Liability, Indemnity');
+  bullet('Services are provided “as is” except as expressly set out. No guarantee of uninterrupted service.');
+  bullet('To the extent permitted by law, Provider is not liable for indirect or consequential loss (including loss of profit, revenue, or data).');
+  bullet('Aggregate liability is capped at the lesser of three (3) months’ service fees or R100,000.');
+  bullet('Customer indemnifies Provider against claims arising from unlawful use or Customer’s breach of this SLA.');
+  rule();
+
+  // Termination & Suspension
+  h('Termination & Suspension');
+  bullet(`Either party may terminate on ${noticeDays} days’ notice. Material breach not remedied within a reasonable period may lead to suspension or termination.`);
+  bullet('On termination, numbers may be ported where legally/contractually allowed; unpaid fees remain due.');
+  rule();
+
+  // General
+  h('General');
+  bullet('This SLA forms part of the broader customer agreement (quotes, order forms, and policies). Conflicts are resolved by most recent signed quote/order.');
+  bullet('South African law governs; venue Johannesburg. Variations require written agreement by both parties.');
+  bullet('If any clause is found unenforceable, the remainder remains in force.');
+  rule();
+
+  // Signature block
+  h('Acceptance & Signature');
+  p('By signing below, the parties agree to this Service Level Agreement and confirm the Monthly Service Fee and scope described above.');
+  const sigY = y + 6;
+  const colW = (right - left - 20) / 2;
+
+  // Provider sign line
+  doc.font('Helvetica').fontSize(8.5).fillColor('#374151');
+  doc.text(`${company?.name || 'VoIP Shop'} (Provider)`, left, sigY);
+  doc.moveTo(left, sigY + 22).lineTo(left + colW, sigY + 22).strokeColor('#9ca3af').stroke();
+  doc.text('Name & Signature', left, sigY + 26);
+  doc.moveTo(left, sigY + 52).lineTo(left + colW * 0.55, sigY + 52).strokeColor('#e5e7eb').stroke();
+  doc.text('Date', left + colW * 0.6, sigY + 46);
+
+  // Customer sign line
+  doc.text(`${customer?.name || 'Customer'} (Customer)`, left + colW + 20, sigY);
+  doc.moveTo(left + colW + 20, sigY + 22).lineTo(left + colW + 20 + colW, sigY + 22).strokeColor('#9ca3af').stroke();
+  doc.text('Name & Signature', left + colW + 20, sigY + 26);
+  doc.moveTo(left + colW + 20, sigY + 52).lineTo(left + colW + 20 + colW * 0.55, sigY + 52).strokeColor('#e5e7eb').stroke();
+  doc.text('Date', left + colW + 20 + colW * 0.6, sigY + 46);
+
+  // Footer page number / tiny disclaimer
+  const footerY = doc.page.height - 36;
+  doc.font('Helvetica').fontSize(7).fillColor('#6b7280')
+     .text(`Agreement No: ${slaNumber} • Page ${doc.page.number}`, left, footerY, { width: right - left, align: 'right' });
+
+  // Done
   doc.end();
   return done;
 }
+
+module.exports = { buildSlaPdfBuffer };
+
 
 /* ========== PORTING LETTER OF AUTHORITY (PDFKit) ========== */
 /* Mirrors your uploaded “Non Geographic & Geographic Number Porting Request Form” and letter. */
