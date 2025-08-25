@@ -2,7 +2,6 @@
 import { Resend } from 'resend';
 import { put } from '@vercel/blob';
 import PDFDocument from 'pdfkit';
-import fetch from 'node-fetch'; // optional if you rely on Node 18 global fetch
 
 // Local file helpers (ESM)
 import fs from 'node:fs/promises';
@@ -13,6 +12,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const resend = new Resend(process.env.RESEND_API_KEY);
+
+// (Optional) force Node runtime in case your project defaults to edge somewhere else
+export const config = { runtime: 'nodejs' };
 
 // ---- Company defaults (override via payload.company) ----
 const COMPANY_DEFAULTS = {
@@ -52,9 +54,8 @@ function escapeHtml(s = '') {
   return String(s).replace(/[&<>"']/g, (m) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
 }
 
-// Prefer local logo; fallback to remote if provided
+// Prefer local logo; fallback to remote if provided (uses global fetch if available)
 async function loadLogoBuffer(overrideUrl = '') {
-  // Your file lives at repo-root/Assets/Group 1642logo (1).png
   const localCandidates = [
     path.resolve(__dirname, '../Assets/Group 1642logo (1).png'),
     path.resolve(__dirname, '../../Assets/Group 1642logo (1).png')
@@ -67,7 +68,7 @@ async function loadLogoBuffer(overrideUrl = '') {
   }
   try {
     const url = overrideUrl || '';
-    if (url && /^https?:\/\//i.test(url)) {
+    if (url && typeof fetch === 'function') {
       const r = await fetch(url, { cache: 'no-store' });
       if (r.ok) return Buffer.from(await r.arrayBuffer());
     }
@@ -324,39 +325,38 @@ function emailBodyTiny({ brand, clientName, monthlyInclVat }) {
     </div>`;
 }
 
-// ---------------- API handler (with PREVIEW mode) ----------------
+// ---------------- API handler (auto-preview if no email) ----------------
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  // Preview flag: works for GET ?preview=1 or POST {preview:true}
-  const isPreview =
-    req.method === 'GET'
-      ? (req.query?.preview === '1' || req.query?.preview === 'true')
-      : (req.body?.preview === true || req.body?.preview === '1' || req.query?.preview === '1');
+  // Preview triggers:
+  // - explicit ?preview=1 (GET or POST)
+  // - GET without a body
+  // - POST but no client.email provided → auto-preview instead of 400
+  const explicitPreview =
+    (req.query?.preview === '1' || req.query?.preview === 'true') ||
+    (req.body?.preview === true || req.body?.preview === '1');
+
+  const body = req.method === 'POST' ? (req.body || {}) : {};
+  const q = withDefaults(body);
+
+  const noEmail = !q?.client?.email;
+  const isPreview = explicitPreview || req.method === 'GET' || noEmail;
 
   try {
-    // For GET preview, we accept no body and just use defaults
-    const body = req.method === 'POST' ? (req.body || {}) : {};
-    const q = withDefaults(body);
-
-    // Generate PDF once
     const pdfBuffer = await buildQuotePdfBuffer(q);
 
     if (isPreview) {
-      // Return the PDF inline in the browser — no email is sent
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `inline; filename=Quote-${q.quoteNumber}.pdf`);
       return res.status(200).send(pdfBuffer);
     }
 
-    // From here on, it's the normal email flow (POST only)
-    if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
-
+    // ---- Normal email flow (POST + has client.email) ----
     const delivery = (body.delivery || '').toLowerCase() || (process.env.USE_BLOB_LINK ? 'link' : 'attach');
-    if (!q?.client?.email) return res.status(400).send('Missing client email.');
 
     const from = 'sales@voipshop.co.za';
     const to = q.client.email;
@@ -366,6 +366,7 @@ export default async function handler(req, res) {
 
     if (delivery === 'link') {
       if (!process.env.BLOB_READ_WRITE_TOKEN) {
+        console.error('Missing BLOB_READ_WRITE_TOKEN for link delivery');
         return res.status(500).send('BLOB_READ_WRITE_TOKEN not set for link delivery.');
       }
       const keyPart = String(q.quoteNumber).replace(/[^\w\-]+/g, '-');
@@ -382,7 +383,10 @@ export default async function handler(req, res) {
         from, to, reply_to: from, subject,
         html: emailBodyWithLink({ brand: q.company, clientName: q.client.name, monthlyInclVat, pdfUrl })
       });
-      if (error) throw error;
+      if (error) {
+        console.error('Resend send error (link):', error);
+        return res.status(502).send('Email send failed: ' + (error?.message || 'unknown'));
+      }
 
       return res.status(200).json({ ok: true, delivery: 'link', pdfUrl });
     } else {
@@ -393,7 +397,10 @@ export default async function handler(req, res) {
           { filename: `Quote-${q.quoteNumber}.pdf`, content: pdfBuffer.toString('base64'), contentType: 'application/pdf' }
         ]
       });
-      if (error) throw error;
+      if (error) {
+        console.error('Resend send error (attach):', error);
+        return res.status(502).send('Email send failed: ' + (error?.message || 'unknown'));
+      }
 
       return res.status(200).json({ ok: true, delivery: 'attach', id: data?.id });
     }
