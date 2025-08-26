@@ -47,11 +47,10 @@ export default async function handler(req, res) {
       { buildSlaPdfBuffer },
       { buildPortingPdfBuffer }
     ] = await Promise.all([
-      import('../services/buildInvoicePdfBuffer.js'),
-      import('../services/buildSlaPdfBuffer.js'),
-      import('../services/buildPortingPdfBuffer.js')
-    ]);
-
+  import('./_services/buildInvoicePdfBuffer.js'),
+  import('./_services/buildSlaPdfBuffer.js'),
+  import('./_services/buildPortingPdfBuffer.js')
+]);
     // ✅ Safe Resend init (env var must be set in this API project)
     const resend = new Resend(process.env.RESEND_API_KEY);
     if (!process.env.RESEND_API_KEY) {

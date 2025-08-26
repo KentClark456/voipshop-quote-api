@@ -1,7 +1,7 @@
 // api/send-quote.js
 import { Resend } from 'resend';
 import { put } from '@vercel/blob';
-import { buildQuotePdfBuffer } from '../services/buildQuotePdfBuffer.js';
+import { buildQuotePdfBuffer } from './services/buildQuotePdfBuffer.js';
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 

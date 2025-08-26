@@ -1,6 +1,6 @@
 // services/buildSlaPdfBuffer.js
 import PDFDocument from 'pdfkit';
-import { drawLogoHeader } from '../utils/pdf-branding.js';
+import { drawLogoHeader } from '../../utils/pdf-branding.js';
 
 export async function buildSlaPdfBuffer(params = {}) {
   const {
