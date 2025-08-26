@@ -1,15 +1,10 @@
 // /api/complete-order.js
 import { Resend } from 'resend';
-import { buildInvoicePdfBuffer } from '../services/buildInvoicePdfBuffer.js';
-import { buildSlaPdfBuffer } from '../services/buildSlaPdfBuffer.js';
-import { buildPortingPdfBuffer } from '../services/buildPortingPdfBuffer.js';
 
-// Ensure we run on the Node serverless runtime (not Edge)
+// Ensure Node runtime (NOT edge)
 export const config = { runtime: 'nodejs' };
 
-const resend = new Resend(process.env.RESEND_API_KEY);
-
-// --- CORS allowlist (add/remove domains as needed) ---
+// --- CORS allowlist (edit as needed) ---
 const ALLOWED_ORIGINS = new Set([
   'http://127.0.0.1:5500',
   'http://localhost:5500',
@@ -22,24 +17,49 @@ function setCors(res, origin) {
   const allow = ALLOWED_ORIGINS.has(origin) ? origin : 'https://voipshop.co.za';
   res.setHeader('Access-Control-Allow-Origin', allow);
   res.setHeader('Vary', 'Origin, Access-Control-Request-Headers');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.setHeader('Access-Control-Max-Age', '86400'); // 24h preflight cache
+  res.setHeader('Access-Control-Max-Age', '86400'); // 24h
 }
 
 export default async function handler(req, res) {
-  const origin = req.headers.origin || '';
-  setCors(res, origin);
-
-  // Preflight
-  if (req.method === 'OPTIONS') return res.status(204).end();
-
-  if (req.method !== 'POST') {
-    res.setHeader('Content-Type', 'application/json');
-    return res.status(405).json({ error: 'Method Not Allowed' });
-  }
-
   try {
+    const origin = req.headers.origin || '';
+    setCors(res, origin);
+
+    // ✅ Preflight
+    if (req.method === 'OPTIONS') return res.status(204).end();
+
+    // ✅ Health check so visiting the URL in a browser doesn’t crash
+    if (req.method === 'GET') {
+      res.setHeader('Content-Type', 'application/json');
+      return res.status(200).json({ ok: true, info: 'complete-order API up' });
+    }
+
+    if (req.method !== 'POST') {
+      res.setHeader('Content-Type', 'application/json');
+      return res.status(405).json({ error: 'Method Not Allowed' });
+    }
+
+    // ✅ Lazy-load heavy / fragile modules AFTER method checks
+    const [
+      { buildInvoicePdfBuffer },
+      { buildSlaPdfBuffer },
+      { buildPortingPdfBuffer }
+    ] = await Promise.all([
+      import('../services/buildInvoicePdfBuffer.js'),
+      import('../services/buildSlaPdfBuffer.js'),
+      import('../services/buildPortingPdfBuffer.js')
+    ]);
+
+    // ✅ Safe Resend init (env var must be set in this API project)
+    const resend = new Resend(process.env.RESEND_API_KEY);
+    if (!process.env.RESEND_API_KEY) {
+      console.error('[complete-order] Missing RESEND_API_KEY env var');
+      return res.status(500).json({ error: 'Server not configured (email).' });
+    }
+
+    // ---------- Parse body ----------
     const body = req.body || {};
     const {
       customer = {},       // { name, company, email, phone, address }
@@ -134,9 +154,9 @@ export default async function handler(req, res) {
     let invoicePdf, slaPdf, portingPdf;
     try {
       [invoicePdf, slaPdf, portingPdf] = await Promise.all([
-        buildInvoicePdfBuffer(invoicePayload),  // -> Buffer
-        buildSlaPdfBuffer(slaPayload),          // -> Buffer
-        buildPortingPdfBuffer(portingPayload)   // -> Buffer
+        buildInvoicePdfBuffer(invoicePayload),  // Buffer
+        buildSlaPdfBuffer(slaPayload),          // Buffer
+        buildPortingPdfBuffer(portingPayload)   // Buffer
       ]);
     } catch (e) {
       console.error('[complete-order] PDF builder error:', e);
@@ -144,7 +164,6 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Failed to build one of the PDFs: ' + (e.message || String(e)) });
     }
 
-    // ---- Send one email with 3 attachments
     const html = `
       <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial;color:#111;max-width:560px;margin:0 auto;padding:24px;">
         <div style="text-align:center;margin-bottom:16px;">
@@ -156,7 +175,7 @@ export default async function handler(req, res) {
       </div>`;
 
     const { error, data } = await resend.emails.send({
-      from: 'sales@voipshop.co.za', // must be a verified sender/domain in Resend
+      from: 'sales@voipshop.co.za', // must be verified in Resend
       to: invoicePayload.client.email,
       reply_to: 'sales@voipshop.co.za',
       subject: `Order ${invoicePayload.orderNumber} • Invoice, SLA & Porting • VoIP Shop`,
