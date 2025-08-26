@@ -1,16 +1,9 @@
 {
-  "name": "voipshopv3",
+  "name": "voipshopv3-api",
   "version": "0.3.0",
-  "description": "Telecommunications store",
-  "main": "index.js",
+  "private": true,
   "type": "module",
-  "scripts": {
-    "start": "node index.js"
-  },
   "dependencies": {
-    "cors": "^2.8.5",
-    "dotenv": "^8.2.0",
-    "express": "^4.17.1",
     "pdfkit": "^0.15.0",
     "resend": "^3.2.0",
     "@vercel/blob": "^0.23.0"
