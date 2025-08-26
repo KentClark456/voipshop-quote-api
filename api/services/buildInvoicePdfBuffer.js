@@ -32,21 +32,46 @@ async function loadLogoBuffer(overrideUrl = '') {
   return null;
 }
 
+// Normalize & default company colors so destructuring never throws
+function resolveColors(colorsIn = {}) {
+  const c = colorsIn || {};
+  const defaults = {
+    brand: '#0ea5e9', // cyan-500-ish accent
+    ink:   '#111827', // gray-900
+    gray6: '#6b7280', // gray-500
+    gray4: '#9ca3af', // gray-400
+    line:  '#e5e7eb', // gray-200
+    thbg:  '#f3f4f6', // gray-100
+    pill:  '#f9fafb'  // gray-50
+  };
+
+  // Allow common aliases people often pass
+  return {
+    brand: c.brand ?? c.primary ?? defaults.brand,
+    ink:   c.ink   ?? c.text    ?? defaults.ink,
+    gray6: c.gray6 ?? c.muted   ?? c.secondary ?? defaults.gray6,
+    gray4: c.gray4 ?? defaults.gray4,
+    line:  c.line  ?? c.border  ?? defaults.line,
+    thbg:  c.thbg  ?? c.header  ?? defaults.thbg,
+    pill:  c.pill  ?? c.panel   ?? defaults.pill
+  };
+}
+
 /**
  * Build INVOICE PDF buffer (matches send-quote.js look & feel)
  * @param {{
- *   invoiceNumber:string, orderNumber:string, dateISO:string, dueDays:number,
+ *   invoiceNumber:string, orderNumber:string, dateISO:string, dueDays?:number,
  *   client:{name?:string, company?:string, email?:string, phone?:string, address?:string},
  *   itemsOnceOff:Array<{name:string, qty:number, unit:number, minutes?:number}>,
  *   itemsMonthly:Array<{name:string, qty:number, unit:number, minutes?:number}>,
  *   subtotals:{ onceOff:number, monthly:number },
  *   notes?:string, stamp?:string, compact?:boolean,
  *   company:{ name:string, address?:string, phone?:string, email?:string, vatRate:number,
- *             logoUrl?:string, colors?:{brand:string, ink:string, gray6:string, gray4:string, line:string, thbg:string, pill:string} }
+ *             logoUrl?:string, colors?:{brand?:string, ink?:string, gray6?:string, gray4?:string, line?:string, thbg?:string, pill?:string} }
  * }} inv
  * @returns {Promise<Buffer>}
  */
-export async function buildInvoicePdfBuffer(inv) {
+export async function buildInvoicePdfBuffer(inv = {}) {
   const compact = !!inv.compact;
 
   const margin = compact ? 40 : 46;
@@ -59,7 +84,8 @@ export async function buildInvoicePdfBuffer(inv) {
   const R = doc.page.width - doc.page.margins.right;
   const W = R - L;
 
-  const { brand, ink, gray6, gray4, line, thbg, pill } = inv.company.colors;
+  // 💡 This line used to throw when colors were undefined
+  const { brand, ink, gray6, gray4, line, thbg, pill } = resolveColors(inv?.company?.colors);
 
   // Optional watermark/stamp (e.g. PAID)
   const paintStamp = (text) => {
@@ -79,48 +105,48 @@ export async function buildInvoicePdfBuffer(inv) {
 
   // Header
   const headerTop = 22;
-  const logoBuf = await loadLogoBuffer(inv.company.logoUrl);
+  const logoBuf = await loadLogoBuffer(inv?.company?.logoUrl);
   if (logoBuf) {
     try { doc.image(logoBuf, L, headerTop, { width: compact ? 130 : 150 }); } catch {}
   } else {
-    doc.font('Helvetica-Bold').fontSize(16).fillColor(ink).text(inv.company.name, L, headerTop);
+    doc.font('Helvetica-Bold').fontSize(16).fillColor(ink).text(inv?.company?.name || 'Company', L, headerTop);
   }
 
   const datePretty = (() => {
-    try { return new Date(inv.dateISO).toISOString().slice(0, 10); }
-    catch { return String(inv.dateISO || '').slice(0, 10); }
+    try { return new Date(inv?.dateISO).toISOString().slice(0, 10); }
+    catch { return String(inv?.dateISO || '').slice(0, 10); }
   })();
 
   doc.font('Helvetica-Bold').fontSize(compact ? 20 : 22).fillColor(ink)
      .text('Invoice', L, headerTop, { width: W, align: 'right' }).moveDown(0.2);
 
   doc.font('Helvetica').fontSize(10).fillColor(gray6)
-     .text(`Invoice #: ${inv.invoiceNumber}`, L, undefined, { width: W, align: 'right' })
-     .text(`Order #: ${inv.orderNumber}`,    L, undefined, { width: W, align: 'right' })
-     .text(`Date: ${datePretty}`,            L, undefined, { width: W, align: 'right' })
-     .text(`Due: ${Number(inv.dueDays || 7)} days`, L, undefined, { width: W, align: 'right' });
+     .text(`Invoice #: ${inv?.invoiceNumber ?? ''}`, L, undefined, { width: W, align: 'right' })
+     .text(`Order #: ${inv?.orderNumber ?? ''}`,    L, undefined, { width: W, align: 'right' })
+     .text(`Date: ${datePretty}`,                   L, undefined, { width: W, align: 'right' })
+     .text(`Due: ${Number(inv?.dueDays ?? 7)} days`,L, undefined, { width: W, align: 'right' });
 
   // Company block
   doc.moveDown(compact ? 1.5 : 2);
-  doc.font('Helvetica-Bold').fontSize(12).fillColor(ink).text(inv.company.name, L, undefined, { width: W });
+  doc.font('Helvetica-Bold').fontSize(12).fillColor(ink).text(inv?.company?.name || 'Company', L, undefined, { width: W });
   doc.font('Helvetica').fontSize(10).fillColor(gray6)
-     .text(inv.company.address || '', L, undefined, { width: W })
-     .text(`${inv.company.phone || ''}${inv.company.email ? ' • ' + inv.company.email : ''}`, L, undefined, { width: W });
+     .text(inv?.company?.address || '', L, undefined, { width: W })
+     .text(`${inv?.company?.phone || ''}${inv?.company?.email ? ' • ' + inv.company.email : ''}`, L, undefined, { width: W });
 
   // Client block
   doc.moveDown(compact ? 1.0 : 1.2);
   doc.font('Helvetica-Bold').fontSize(11).fillColor(ink).text('Bill To', L, undefined, { width: W });
   doc.font('Helvetica').fontSize(10).fillColor(ink)
-     .text(inv.client?.name || '', L, undefined, { width: W })
-     .text(inv.client?.company || '', L, undefined, { width: W })
-     .text(inv.client?.email || '', L, undefined, { width: W })
-     .text(inv.client?.phone || '', L, undefined, { width: W })
-     .text(inv.client?.address || '', L, undefined, { width: W });
+     .text(inv?.client?.name || '', L, undefined, { width: W })
+     .text(inv?.client?.company || '', L, undefined, { width: W })
+     .text(inv?.client?.email || '', L, undefined, { width: W })
+     .text(inv?.client?.phone || '', L, undefined, { width: W })
+     .text(inv?.client?.address || '', L, undefined, { width: W });
 
   // Totals
-  const vatRate = Number(inv.company.vatRate ?? 0.15);
-  const onceSub = Number(inv.subtotals.onceOff || 0);
-  const monSub  = Number(inv.subtotals.monthly || 0);
+  const vatRate = Number(inv?.company?.vatRate ?? 0.15);
+  const onceSub = Number(inv?.subtotals?.onceOff || 0);
+  const monSub  = Number(inv?.subtotals?.monthly || 0);
   const onceVat = onceSub * vatRate;
   const monVat  = monSub * vatRate;
   const onceTotal = onceSub + onceVat;
@@ -149,17 +175,17 @@ export async function buildInvoicePdfBuffer(inv) {
   doc.y = yStart + cardH + (compact ? 12 : 16);
 
   const unitText = (it, monthly) => {
-    const looksLikeCalls = /call|minute/i.test(it.name);
-    const minutes = it.minutes;
+    const looksLikeCalls = /call|minute/i.test(it?.name || '');
+    const minutes = it?.minutes;
     if (monthly && (minutes != null || looksLikeCalls)) {
       const m = Number(minutes) || 0;
       return m > 0 ? `${m} minutes` : 'Included minutes';
     }
-    return money(it.unit);
+    return money(it?.unit || 0);
   };
 
   // Table renderer
-  const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
+  const table = (title, items = [], subtotalEx, vatAmt, totalInc, monthly = false) => {
     const colW = [ W * 0.58, W * 0.12, W * 0.12, W * 0.18 ];
     const rowH = compact ? 20 : 24;
     const headH = compact ? 18 : 20;
@@ -185,7 +211,7 @@ export async function buildInvoicePdfBuffer(inv) {
     const ensureSpace = (need = 140) => {
       if (y > doc.page.height - need) {
         doc.addPage();
-        paintStamp(inv.stamp);
+        paintStamp(inv?.stamp);
         y = doc.y;
       }
     };
@@ -197,17 +223,17 @@ export async function buildInvoicePdfBuffer(inv) {
     } else {
       for (const it of items) {
         ensureSpace(160);
-        const qty    = Number(it.qty || 1);
-        const amount = it.unit * qty;
+        const qty    = Number(it?.qty || 1);
+        const amount = (Number(it?.unit || 0)) * qty;
 
         doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
         rowIndex++;
 
         const rowTextY = y + (compact ? 4 : 6);
-        doc.text(String(it.name || ''), L + 8, rowTextY, { width: colW[0] - 10 });
-        doc.text(String(qty),           L + colW[0], rowTextY, { width: colW[1], align: 'right' });
-        doc.text(unitText(it, monthly), L + colW[0] + colW[1], rowTextY, { width: colW[2], align: 'right' });
-        doc.text(money(amount),         L + colW[0] + colW[1] + colW[2], rowTextY, { width: colW[3], align: 'right' });
+        doc.text(String(it?.name || ''), L + 8, rowTextY, { width: colW[0] - 10 });
+        doc.text(String(qty),            L + colW[0], rowTextY, { width: colW[1], align: 'right' });
+        doc.text(unitText(it, monthly),  L + colW[0] + colW[1], rowTextY, { width: colW[2], align: 'right' });
+        doc.text(money(amount),          L + colW[0] + colW[1] + colW[2], rowTextY, { width: colW[3], align: 'right' });
 
         y += rowH;
       }
@@ -225,7 +251,7 @@ export async function buildInvoicePdfBuffer(inv) {
       doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10).fillColor(bold ? ink : gray6)
          .text(label, labelX, y, { width: labelW, align: 'right' });
       doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(ink)
-         .text(money(val), valX, y, { width: valW, align: 'right' });
+         .text(money(val || 0), valX, y, { width: valW, align: 'right' });
       y += compact ? 14 : 16;
     };
 
@@ -237,12 +263,12 @@ export async function buildInvoicePdfBuffer(inv) {
   };
 
   // First-page stamp
-  paintStamp(inv.stamp);
+  paintStamp(inv?.stamp);
 
   // Sections
-  table('Once-off Charges', inv.itemsOnceOff, onceSub, onceVat, onceTotal, false);
+  table('Once-off Charges', inv?.itemsOnceOff || [], onceSub, onceVat, onceTotal, false);
   doc.moveDown(compact ? 0.6 : 0.8);
-  table('Monthly Charges', inv.itemsMonthly, monSub, monVat, monTotal, true);
+  table('Monthly Charges',  inv?.itemsMonthly || [], monSub,  monVat,  monTotal,  true);
   doc.moveDown(compact ? 1.0 : 1.2);
 
   // Pay-now band
@@ -259,8 +285,8 @@ export async function buildInvoicePdfBuffer(inv) {
   // Notes
   const blurb = [
     'Included: Professional install & device setup; Remote support; PBX configuration; Number porting assistance. Standard call-out fee: R450.',
-    inv.notes ? `Notes: ${inv.notes}` : '',
-    `Payment terms: once-off on installation; monthly fees billed in advance.`
+    inv?.notes ? `Notes: ${inv.notes}` : '',
+    'Payment terms: once-off on installation; monthly fees billed in advance.'
   ].filter(Boolean).join('\n');
 
   doc.font('Helvetica').fontSize(9).fillColor(gray6).text(blurb, L, undefined, { width: W });
@@ -269,12 +295,12 @@ export async function buildInvoicePdfBuffer(inv) {
   const addFooter = () => {
     const y = doc.page.height - 30;
     doc.font('Helvetica').fontSize(9).fillColor(gray4)
-       .text(`${inv.company.name} • ${inv.company.email} • ${inv.company.phone}`, L, y, { width: W, align: 'left' })
+       .text(`${inv?.company?.name || 'Company'} • ${inv?.company?.email || ''} • ${inv?.company?.phone || ''}`, L, y, { width: W, align: 'left' })
        .text(`Page ${doc.page.number}`, L, y, { width: W, align: 'right' });
   };
   addFooter();
   doc.on('pageAdded', () => {
-    paintStamp(inv.stamp);
+    paintStamp(inv?.stamp);
     addFooter();
   });
 
