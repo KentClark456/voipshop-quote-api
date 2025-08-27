@@ -1,4 +1,4 @@
-// services/buildInvoicePdfBuffer.js
+// services/buildQuotePdfBuffer.js
 import PDFDocument from 'pdfkit';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -34,12 +34,12 @@ async function loadLogoBuffer(overrideUrl = '') {
 }
 
 /**
- * Single-page INVOICE PDF:
+ * Single-page QUOTE PDF:
  * - Tight, consistent spacing
  * - Hard one-page cap (no auto addPage)
  * - Minutes logic: Qty = minutes, Unit = "minutes", Amount = plan price
  */
-export async function buildInvoicePdfBuffer(q) {
+export async function buildQuotePdfBuffer(q) {
   // Always render compact to help 1-page fit
   const compact = true;
 
@@ -107,13 +107,13 @@ export async function buildInvoicePdfBuffer(q) {
   })();
 
   doc.font('Helvetica-Bold').fontSize(20).fillColor(ink)
-    .text('Invoice', L, headerTop, { width: W, align: 'right' })
+    .text('Quote', L, headerTop, { width: W, align: 'right' })
     .moveDown(0.2);
 
-doc.font('Helvetica').fontSize(9.5).fillColor(gray6)
-  .text(`Invoice #: ${(q.invoiceNumber ?? q.quoteNumber) || ''}`, L, undefined, { width: W, align: 'right' })
-  .text(`Date: ${datePretty}`,                                   L, undefined, { width: W, align: 'right' })
-  .text(`Valid: ${Number(q.validDays ?? 7)} days`,               L, undefined, { width: W, align: 'right' });
+  doc.font('Helvetica').fontSize(9.5).fillColor(gray6)
+    .text(`Quote #: ${q.quoteNumber || ''}`, L, undefined, { width: W, align: 'right' })
+    .text(`Date: ${datePretty}`,            L, undefined, { width: W, align: 'right' })
+    .text(`Valid: ${Number(q.validDays ?? 7)} days`, L, undefined, { width: W, align: 'right' });
 
   // Company block
   doc.moveDown(1.0);
@@ -219,44 +219,17 @@ doc.font('Helvetica').fontSize(9.5).fillColor(gray6)
         if (!ensureSpace(150)) { hiddenCount = items.length - i; break; }
 
         const it = items[i] || {};
-        const nameStr = String(it.name || '');
+        const looksLikeCalls = /call|minute/i.test(String(it.name || ''));
+        const itemMinutes = Number(it.minutes ?? it.qtyMinutes ?? it.qty_min ?? 0);
+        const minutesForRow = itemMinutes || (looksLikeCalls ? globalMinutes : 0);
 
-        // ---- Minutes-aware detection ----
-        const isCallsFlag = it.isCalls === true || /^(calls)\s*$/i.test(nameStr);
-        const bundleSize  = Number(it.bundleSize || 250);     // default bundle size
-        const itemMinutes = Number(
-          it.minutes ??
-          it.qtyMinutes ??
-          it.minutesIncluded ??
-          it.includedMinutes ??
-          it.qty_min ??
-          it.qty_mins ??
-          it.mins ??
-          0
-        );
+        const isMinutesBundle = monthly && (minutesForRow > 0 || looksLikeCalls);
 
-        // If payload didn’t include minutes, use global fallback when it looks like calls/minutes
-        const looksLikeCalls = /call|min(ute)?s?/i.test(nameStr);
-        let minutesForRow = itemMinutes || ((isCallsFlag || looksLikeCalls) ? globalMinutes : 0);
-
-        // Treat this as a minutes bundle only on the monthly table
-        let isMinutesBundle = monthly && (isCallsFlag || looksLikeCalls || minutesForRow > 0);
-
-        // If still zero minutes but qty>0 on a calls row, interpret qty as #bundles → minutes
-        if (isMinutesBundle && minutesForRow === 0 && Number(it.qty) > 0) {
-          minutesForRow = Number(it.qty) * bundleSize;
-        }
-
-        // Final render values
-        const qtyVal      = isMinutesBundle ? minutesForRow : Number(it.qty || 1);
+        const qtyVal = isMinutesBundle ? (minutesForRow || 0) : Number(it.qty || 1);
         const unitDisplay = isMinutesBundle ? 'minutes' : money(Number(it.unit || 0));
-
-        // Amount: for minutes bundles, charge per bundle (not per minute)
-        const bundles = isMinutesBundle
-          ? (bundleSize > 0 ? (minutesForRow / bundleSize) : 0)
-          : Number(it.qty || 1);
-
-        const amount = Number(it.unit || 0) * bundles;
+        const amount = isMinutesBundle
+          ? Number(it.unit || 0)
+          : Number(it.unit || 0) * qtyVal;
 
         // Row bg
         doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
@@ -315,7 +288,7 @@ doc.font('Helvetica').fontSize(9.5).fillColor(gray6)
   doc.moveDown(0.4);
   table('Monthly Charges', q.itemsMonthly || [], monSub, monVat, monTotal, true);
 
-  // Pay-now band (unchanged per your request)
+  // Pay-now band
   if (ensureSpace(40)) {
     const yBand = doc.y + 2;
     const bandH = 28;
