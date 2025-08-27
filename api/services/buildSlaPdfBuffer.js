@@ -54,28 +54,17 @@ export async function buildSlaPdfBuffer(params = {}) {
   const hasSpace = (need) => doc.y <= (pageBottom() - (need + FOOTER_H));
   const moveY = (amt=0) => { y = (doc.y = (doc.y + amt)); };
 
-  const h  = (t) => {
-    if (!hasSpace(16)) return;
-    doc.font('Helvetica-Bold').fontSize(10.5).fillColor(INK).text(t, L, y, { width: W });
-    moveY(4);
-  };
-  const p  = (t, opts={}) => {
-    const hgt = doc.heightOfString(String(t||''), { width: W, lineGap: 0.8, ...opts });
-    if (!hasSpace(hgt + 4)) return;
-    doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(t, L, y, { width: W, lineGap: 0.8, ...opts });
-    moveY(4); doc.fillColor(INK);
-  };
-  const kv = (k,v) => {
-    if (!hasSpace(16)) return;
-    const mid = L + W * 0.30;
-    doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(k, L, y, { width: mid - L - 6 });
-    doc.font('Helvetica-Bold').fontSize(8).fillColor(INK).text(v || '—', mid, y, { width: R - mid });
-    moveY(3.5);
-  };
-
   // ---------- Card helpers ----------
+  // Increased padTop + larger inter-card gap so the pill sits clearly above its card content,
+  // and there’s space before the next card begins.
   const drawCard = (title, contentCb, options = {}) => {
-    const { padTop = 18, minHeight = 64, titleMax = 220 } = options;
+    const {
+      padTop = 26,      // was 18
+      minHeight = 72,   // was 64
+      titleMax = 260,
+      gapAfter = 14     // added; gap after each card so pills never crowd the next card
+    } = options;
+
     const cardTop = y;
     const innerLeft = L + 12;
     const maxW = W - 24;
@@ -87,40 +76,43 @@ export async function buildSlaPdfBuffer(params = {}) {
     contentCb({ x: innerLeft, w: maxW });
 
     // Finalize card
-    const cardBottom = y + 10;
+    const cardBottom = y + 12;
     const hCard = Math.max(minHeight, cardBottom - cardTop);
 
     doc.save();
     doc.roundedRect(L, cardTop, W, hCard, 10).strokeColor(BORDER).lineWidth(1).stroke();
-    const titleW = Math.min(titleMax, doc.widthOfString(title, { font: 'Helvetica-Bold', size: 9 }) + 24);
-    doc.roundedRect(L + 12, cardTop - 10, titleW, 20, 10).fillColor('white').fill();
-    doc.roundedRect(L + 12, cardTop - 10, titleW, 20, 10).strokeColor(BORDER).lineWidth(1).stroke();
-    doc.fillColor(INK).font('Helvetica-Bold').fontSize(9)
-       .text(title, L + 22, cardTop - 6, { width: titleW - 20, align: 'left' });
+
+    // Title pill slightly above the card, not touching next section
+    const titleW = Math.min(titleMax, doc.widthOfString(title, { font: 'Helvetica-Bold', size: 9 }) + 28);
+    const pillY = cardTop - 12; // a bit higher so it “floats” cleanly
+    doc.roundedRect(L + 12, pillY, titleW, 24, 12).fillColor('white').fill();
+    doc.roundedRect(L + 12, pillY, titleW, 24, 12).strokeColor(BORDER).lineWidth(1).stroke();
+    doc.fillColor(INK).font('Helvetica-Bold').fontSize(9.5)
+       .text(title, L + 12 + 12, pillY + 6, { width: titleW - 24, align: 'left' });
     doc.restore();
 
-    // Cursor after card
-    doc.y = cardTop + hCard; y = doc.y + 8;
+    // Cursor after card with extra gap
+    doc.y = cardTop + hCard + gapAfter; y = doc.y;
   };
 
   const lineFill = ({ x, w }, label, preset = '', lineW = w * 0.6) => {
-    if (!hasSpace(20)) return;
+    if (!hasSpace(22)) return;
     const labelW = Math.min(160, Math.max(110, w * 0.30));
     const lx = x;
     doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, lx, y + 2, { width: labelW - 8 });
     const sx = lx + labelW;
-    const ly = y + 12;
+    const ly = y + 13;
     doc.moveTo(sx, ly).lineTo(sx + lineW, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
     if (preset) {
       doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), sx + 2, y + 4, { width: lineW - 6, ellipsis: true });
     }
-    moveY(18);
+    moveY(19);
   };
 
   // 2-up (left/right) fields inside a single card with a vertical divider
   const drawTwoUpCard = (title, leftCb, rightCb) => {
     const cardTop = y;
-    const padTop = 18;
+    const padTop = 26; // match drawCard
     const startY = y + padTop;
     const innerPad = 12;
 
@@ -136,57 +128,57 @@ export async function buildSlaPdfBuffer(params = {}) {
     let yLeft = innerTop;
     let yRight = innerTop;
 
-    // Helpers that operate with their own y trackers
-    const lf = (label, preset = '', lineW = colWidth * 0.6) => {
-      if (yLeft + 20 > pageBottom() - FOOTER_H - 10) return;
-      const labelW = Math.min(150, Math.max(110, colWidth * 0.35));
+    const lf = (label, preset = '', lineW = colWidth * 0.62) => {
+      if (yLeft + 22 > pageBottom() - FOOTER_H - 12) return;
+      const labelW = Math.min(150, Math.max(110, colWidth * 0.38));
       doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, leftX, yLeft + 2, { width: labelW - 8 });
       const sx = leftX + labelW;
-      const ly = yLeft + 12;
+      const ly = yLeft + 13;
       doc.moveTo(sx, ly).lineTo(sx + lineW, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
       if (preset) doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), sx + 2, yLeft + 4, { width: lineW - 6, ellipsis: true });
-      yLeft += 18;
+      yLeft += 19;
     };
-    const rf = (label, preset = '', lineW = colWidth * 0.6) => {
-      if (yRight + 20 > pageBottom() - FOOTER_H - 10) return;
-      const labelW = Math.min(150, Math.max(110, colWidth * 0.35));
+    const rf = (label, preset = '', lineW = colWidth * 0.62) => {
+      if (yRight + 22 > pageBottom() - FOOTER_H - 12) return;
+      const labelW = Math.min(150, Math.max(110, colWidth * 0.38));
       doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, rightX, yRight + 2, { width: labelW - 8 });
       const sx = rightX + labelW;
-      const ly = yRight + 12;
+      const ly = yRight + 13;
       doc.moveTo(sx, ly).lineTo(sx + lineW, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
       if (preset) doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), sx + 2, yRight + 4, { width: lineW - 6, ellipsis: true });
-      yRight += 18;
+      yRight += 19;
     };
 
-    // Section headings inside columns
-    doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text('Provider Details', leftX, innerTop);
-    yLeft += 14;
-    doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text('Customer Details', rightX, innerTop);
-    yRight += 14;
+    // Column headings
+    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK).text('Provider Details', leftX, innerTop);
+    yLeft += 16;
+    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK).text('Customer Details', rightX, innerTop);
+    yRight += 16;
 
-    // Call callbacks to fill each column
+    // Fill each column
     leftCb({ lf, leftX, colWidth });
     rightCb({ rf, rightX, colWidth });
 
     // Compute card height based on the taller column
-    const contentBottom = Math.max(yLeft, yRight) + 8;
-    const hCard = Math.max(82, (contentBottom - cardTop));
+    const contentBottom = Math.max(yLeft, yRight) + 10;
+    const hCard = Math.max(96, (contentBottom - cardTop));
 
-    // Draw card and title
+    // Draw card + divider + pill
     doc.save();
     doc.roundedRect(L, cardTop, W, hCard, 10).strokeColor(BORDER).lineWidth(1).stroke();
 
-    // Vertical divider
     const midX = leftX + colWidth + (colGap / 2);
-    doc.moveTo(midX, innerTop - 6).lineTo(midX, cardTop + hCard - 8).strokeColor('#EFEFEF').lineWidth(1).stroke();
+    doc.moveTo(midX, innerTop - 6).lineTo(midX, cardTop + hCard - 10).strokeColor('#EFEFEF').lineWidth(1).stroke();
 
-    const titleW = Math.min(260, doc.widthOfString(title, { font: 'Helvetica-Bold', size: 9 }) + 24);
-    doc.roundedRect(L + 12, cardTop - 10, titleW, 20, 10).fillColor('white').fill();
-    doc.roundedRect(L + 12, cardTop - 10, titleW, 20, 10).strokeColor(BORDER).lineWidth(1).stroke();
-    doc.fillColor(INK).font('Helvetica-Bold').fontSize(9).text(title, L + 22, cardTop - 6, { width: titleW - 20, align: 'left' });
+    const titleW = Math.min(280, doc.widthOfString(title, { font: 'Helvetica-Bold', size: 9 }) + 28);
+    const pillY = cardTop - 12;
+    doc.roundedRect(L + 12, pillY, titleW, 24, 12).fillColor('white').fill();
+    doc.roundedRect(L + 12, pillY, titleW, 24, 12).strokeColor(BORDER).lineWidth(1).stroke();
+    doc.fillColor(INK).font('Helvetica-Bold').fontSize(9.5).text(title, L + 24, pillY + 6, { width: titleW - 24, align: 'left' });
     doc.restore();
 
-    doc.y = cardTop + hCard; y = doc.y + 8;
+    // Cursor after card + generous gap
+    doc.y = cardTop + hCard + 14; y = doc.y;
   };
 
   // ---- Header (Page 1) ----
@@ -210,18 +202,9 @@ export async function buildSlaPdfBuffer(params = {}) {
     moveY(26);
   }
 
-  // ---- Parties (summary list)
-  h('Parties');
-  kv('Provider', `${company?.name || 'VoIP Shop'}${company?.vat ? ` | VAT ${company.vat}` : ''}`);
-  kv('Contact', `${company?.phone || ''}${company?.email ? ` | ${company.email}`:''}${company?.website ? ` | ${company.website}`:''}`);
-  kv('Address', company?.address || '');
-  moveY(1.5);
-  kv('Customer', `${customer?.name || 'Customer'}${customer?.reg ? ` | Reg ${customer.reg}` : ''}${customer?.vat ? ` | VAT ${customer.vat}` : ''}`);
-  kv('Contact', `${customer?.contact || ''}${customer?.phone ? ` | ${customer.phone}`:''}${customer?.email ? ` | ${customer.email}`:''}`);
-  kv('Address', customer?.address || '');
-  moveY(6);
+  // ❌ REMOVED: simple "Parties" summary list at the top to free space.
 
-  // ---- Parties — Details (Two-up in one card)
+  // ✅ KEEP: Parties — Details (Two-up in one card)
   drawTwoUpCard('Parties — Details (Fill In)',
     ({ lf }) => {
       lf('Provider Name', company?.name || 'VoIP Shop');
@@ -298,7 +281,7 @@ export async function buildSlaPdfBuffer(params = {}) {
     }
   }, { minHeight: 90 });
 
-  // ---- Fees & Billing (compact card so Debit Mandate gets space)
+  // ---- Fees & Billing (compact card)
   const ex  = Number.isFinite(monthlyExVat) ? monthlyExVat : 0;
   const inc = Number.isFinite(monthlyInclVat) ? monthlyInclVat
             : Math.round(ex * (1 + (Number(vatRate)||0)) * 100) / 100;
@@ -323,15 +306,15 @@ export async function buildSlaPdfBuffer(params = {}) {
   drawCard('Debit Order Mandate (Fill In)', (box) => {
     const labelW = 140;
     const fill = (label, preset = '', width = box.w - labelW - 22) => {
-      if (!hasSpace(20)) return;
+      if (!hasSpace(22)) return;
       const lx = box.x + labelW;
       doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, box.x, y + 2, { width: labelW - 10 });
-      const ly = y + 12;
+      const ly = y + 13;
       doc.moveTo(lx, ly).lineTo(lx + width, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
       if (preset) {
         doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), lx + 2, y + 4, { width: width - 4, ellipsis: true });
       }
-      moveY(18);
+      moveY(19);
     };
     fill('Account Holder', debitOrder?.accountName || '');
     fill('Bank', debitOrder?.bank || '');
@@ -342,17 +325,17 @@ export async function buildSlaPdfBuffer(params = {}) {
     fill('Mandate Date (YYYY-MM-DD)', debitOrder?.mandateDateISO || '', 200);
 
     // signatures inline (clear spacing)
-    if (hasSpace(30)) {
+    if (hasSpace(32)) {
       const colW = (box.w - 20) / 2;
       const sx1 = box.x, sx2 = box.x + colW + 20;
-      const sY = y + 8;
+      const sY = y + 10;
       doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('Customer Signature', sx1, sY - 12);
       doc.moveTo(sx1, sY).lineTo(sx1 + colW, sY).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
       doc.text('Date', sx2, sY - 12);
       doc.moveTo(sx2, sY).lineTo(sx2 + colW, sY).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-      y = sY + 14; doc.y = y;
+      y = sY + 16; doc.y = y;
     }
-  }, { minHeight: 150, titleMax: 260 });
+  }, { minHeight: 160, titleMax: 260 });
 
   // ---- Client Initials (bottom of page 1)
   const initialsY = pageBottom() - FOOTER_H - 10;
@@ -385,34 +368,29 @@ export async function buildSlaPdfBuffer(params = {}) {
   const colTop = y;
   const colBottom = pageBottom() - FOOTER_H - 12;
 
-  // New: maintain y per column, prevent overlap
+  // Maintain y per column, prevent overlap
   let colYs = [colTop, colTop]; // left, right
 
   const tryWriteSection = (colIndex, title, bullets) => {
     let x = colX(colIndex);
     let yCursor = colYs[colIndex];
 
-    // Measure header height
-    const headerH = 16; // approx incl underline + gap
-    // Estimate bullets height
+    const headerH = 16; // header + underline + gap
     const bulletsH = bullets.reduce((acc, t) => {
       const h = 12 + doc.heightOfString(String(t||''), { width: COL_W - 14, lineGap: 0.5 });
       return acc + h + 6;
     }, 0);
 
     const needed = headerH + bulletsH + 6;
-    if (yCursor + needed > colBottom) return false; // not enough space
+    if (yCursor + needed > colBottom) return false;
 
-    // Render header
-    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK)
-       .text(title, x, yCursor, { width: COL_W });
+    // Header
+    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK).text(title, x, yCursor, { width: COL_W });
     doc.moveTo(x, doc.y + 2).lineTo(x + COL_W, doc.y + 2).strokeColor(BORDER).lineWidth(1).stroke();
     yCursor = doc.y + 8;
 
-    // Render bullets
+    // Bullets
     for (const t of bullets) {
-      const est = 12 + doc.heightOfString(String(t||''), { width: COL_W - 14, lineGap: 0.5 });
-      // (We already reserved space; no need to re-check)
       const bx = x + 8;
       doc.circle(x + 2.5, yCursor + 3.2, 1.1).fill('#6B7280');
       doc.fillColor(MUTED).font('Helvetica').fontSize(7.8)
@@ -421,24 +399,19 @@ export async function buildSlaPdfBuffer(params = {}) {
       doc.fillColor(INK);
     }
 
-    // Spacing after section
     yCursor += 6;
     colYs[colIndex] = yCursor;
     return true;
   };
 
   const placeSection = (title, bullets) => {
-    // Try left then right; if left doesn't fit, try right; if neither fits, stop adding more
     if (!tryWriteSection(0, title, bullets)) {
-      if (!tryWriteSection(1, title, bullets)) {
-        // Not enough room in either column — stop adding sections
-        return false;
-      }
+      if (!tryWriteSection(1, title, bullets)) return false;
     }
     return true;
   };
 
-  // Content packs
+  // Content packs (added two new ones before General)
   const sections = [
     {
       title: 'Support & Service Levels',
@@ -477,6 +450,26 @@ export async function buildSlaPdfBuffer(params = {}) {
         'Manufacturer warranties (typically 12 months, return-to-base) apply; excludes surges/liquids/abuse/unauthorised firmware.',
         'Loan devices may be offered at VoIP Shop’s discretion and current pricing.',
         'Number porting timelines subject to donor carrier processes; RICA requirements apply.'
+      ]
+    },
+    // NEW 1
+    {
+      title: 'Data Protection (POPIA)',
+      bullets: [
+        'Both parties shall process personal information in compliance with POPIA.',
+        'Where call recording is enabled, Customer must ensure lawful basis, appropriate notices to staff/callers, and retention/deletion policies.',
+        'Customer is responsible for limiting access to recordings and ensuring secure storage of exported data.',
+        'Any suspected breach must be reported without undue delay and cooperatively mitigated.'
+      ]
+    },
+    // NEW 2
+    {
+      title: 'Service Limitations & Exclusions',
+      bullets: [
+        'Quality of service may be affected by Customer LAN/Wi-Fi, power, third-party ISP/carriers, or environmental factors outside VoIP Shop’s control.',
+        'SLA does not cover force majeure events (e.g., load-shedding, strikes, disasters) or faults within third-party networks.',
+        'Moves/Adds/Changes outside standard scope may be chargeable and are handled as P3 tickets.',
+        'Hardware damage from surges/liquids/abuse and unauthorised firmware changes are excluded from warranty.'
       ]
     },
     {
