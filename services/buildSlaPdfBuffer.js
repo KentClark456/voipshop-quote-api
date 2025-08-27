@@ -168,15 +168,22 @@ export async function buildSlaPdfBuffer(params = {}) {
     doc.y = cardTop + hCard + 12; y = doc.y;
   };
 
-  // ---- Header (Page 1) ----
-  y = await drawLogoHeader(doc, {
-    logoUrl: company?.logoUrl,
-    align: 'right',
-    title: 'Service Level Agreement',
-    subtitle: company?.website || ''
-  });
-  y = Math.max(y, 70);
-  doc.y = y;
+// ---- Header (Page 1) ----
+const ABS_LOGO = '/Users/shenaidclark/Desktop/voipshop-quote-api/api/assets/Group 1642logo (1).png';
+
+y = await drawLogoHeader(doc, {
+  logoUrl: company?.logoUrl || `file://${ABS_LOGO}`,   // ✅ fallback to your absolute path
+  localLogoHints: [ ABS_LOGO ],                        // ✅ optional hint list
+  align: 'right',
+  title: 'Service Level Agreement',
+  subtitle: company?.website || '',
+  maxLogoWidth: 130,
+  top: 18
+});
+y = Math.max(y, 70);
+doc.y = y;
+
+
 
   // ---- Meta strip
   if (hasSpace(24)) {
@@ -377,18 +384,22 @@ export async function buildSlaPdfBuffer(params = {}) {
   doc.font('Helvetica').fontSize(7).fillColor(MUTED)
      .text(`Agreement No: ${slaNumber} • Page 1 of 2`, L, footer1Y, { width: W, align: 'right' });
 
-  // =========================
-  // PAGE 2 — Terms & Conditions (strict 2-column layout)
-  // =========================
-  doc.addPage();
-  y = await drawLogoHeader(doc, {
-    logoUrl: company?.logoUrl,
-    align: 'right',
-    title: 'Terms & Conditions',
-    subtitle: company?.website || ''
-  });
-  y = Math.max(y, 70);
-  doc.y = y;
+// =========================
+// PAGE 2 — Terms & Conditions
+// =========================
+doc.addPage();
+y = await drawLogoHeader(doc, {
+  logoUrl: company?.logoUrl || `file://${ABS_LOGO}`,
+  localLogoHints: [ ABS_LOGO ],
+  align: 'right',
+  title: 'Terms & Conditions',
+  subtitle: company?.website || '',
+  maxLogoWidth: 130,
+  top: 18
+});
+y = Math.max(y, 70);
+doc.y = y;
+
 
   // Column geometry
   const COL_GAP = 22;
