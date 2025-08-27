@@ -7,10 +7,11 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Helpers
+// Money (ZAR)
 const money = (n) =>
   'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+// Prefer local logo; fallback to remote if provided
 async function loadLogoBuffer(overrideUrl = '') {
   const localCandidates = [
     path.resolve(__dirname, '../Assets/Group 1642logo (1).png'),
@@ -32,20 +33,18 @@ async function loadLogoBuffer(overrideUrl = '') {
   return null;
 }
 
-// Normalize & default company colors so destructuring never throws
+// Colors with safe defaults (aligns with quote)
 function resolveColors(colorsIn = {}) {
   const c = colorsIn || {};
   const defaults = {
-    brand: '#0ea5e9', // cyan-500-ish accent
-    ink:   '#111827', // gray-900
-    gray6: '#6b7280', // gray-500
-    gray4: '#9ca3af', // gray-400
-    line:  '#e5e7eb', // gray-200
-    thbg:  '#f3f4f6', // gray-100
-    pill:  '#f9fafb'  // gray-50
+    brand: '#0ea5e9', // accent
+    ink:   '#111827', // text
+    gray6: '#6b7280', // muted text
+    gray4: '#9ca3af', // light text
+    line:  '#e5e7eb', // borders
+    thbg:  '#f3f4f6', // table header bg
+    pill:  '#f9fafb', // card bg
   };
-
-  // Allow common aliases people often pass
   return {
     brand: c.brand ?? c.primary ?? defaults.brand,
     ink:   c.ink   ?? c.text    ?? defaults.ink,
@@ -53,14 +52,14 @@ function resolveColors(colorsIn = {}) {
     gray4: c.gray4 ?? defaults.gray4,
     line:  c.line  ?? c.border  ?? defaults.line,
     thbg:  c.thbg  ?? c.header  ?? defaults.thbg,
-    pill:  c.pill  ?? c.panel   ?? defaults.pill
+    pill:  c.pill  ?? c.panel   ?? defaults.pill,
   };
 }
 
 /**
- * Build INVOICE PDF buffer (matches send-quote.js look & feel)
+ * Build INVOICE PDF buffer — visually identical to Quote (title changed to "Invoice")
  * @param {{
- *   invoiceNumber:string, orderNumber:string, dateISO:string, dueDays?:number,
+ *   invoiceNumber:string, orderNumber?:string, dateISO:string, dueDays?:number,
  *   client:{name?:string, company?:string, email?:string, phone?:string, address?:string},
  *   itemsOnceOff:Array<{name:string, qty:number, unit:number, minutes?:number}>,
  *   itemsMonthly:Array<{name:string, qty:number, unit:number, minutes?:number}>,
@@ -74,8 +73,7 @@ function resolveColors(colorsIn = {}) {
 export async function buildInvoicePdfBuffer(inv = {}) {
   const compact = !!inv.compact;
 
-  const margin = compact ? 40 : 46;
-  const doc = new PDFDocument({ size: 'A4', margin });
+  const doc = new PDFDocument({ size: 'A4', margin: compact ? 40 : 46 });
   const chunks = [];
   doc.on('data', (c) => chunks.push(c));
   const done = new Promise((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
@@ -84,26 +82,24 @@ export async function buildInvoicePdfBuffer(inv = {}) {
   const R = doc.page.width - doc.page.margins.right;
   const W = R - L;
 
-  // 💡 This line used to throw when colors were undefined
   const { brand, ink, gray6, gray4, line, thbg, pill } = resolveColors(inv?.company?.colors);
 
-  // Optional watermark/stamp (e.g. PAID)
+  // Optional big watermark (e.g., PAID)
   const paintStamp = (text) => {
     if (!text) return;
     doc.save();
     doc.rotate(-30, { origin: [doc.page.width / 2, doc.page.height / 2] });
     doc.font('Helvetica-Bold').fontSize(90).fillColor('#EEF2FF').opacity(0.7)
        .text(text, doc.page.width * 0.1, doc.page.height * 0.25, {
-         width: doc.page.width * 0.8,
-         align: 'center'
+         width: doc.page.width * 0.8, align: 'center'
        });
     doc.opacity(1).restore();
   };
 
-  // Top brand hairline
+  // Top brand hairline (matches quote)
   doc.save().rect(0, 0, doc.page.width, 6).fill(brand).restore();
 
-  // Header
+  // Header (logo + right title/meta)
   const headerTop = 22;
   const logoBuf = await loadLogoBuffer(inv?.company?.logoUrl);
   if (logoBuf) {
@@ -117,6 +113,7 @@ export async function buildInvoicePdfBuffer(inv = {}) {
     catch { return String(inv?.dateISO || '').slice(0, 10); }
   })();
 
+  // Title (only difference vs quote is the word "Invoice")
   doc.font('Helvetica-Bold').fontSize(compact ? 20 : 22).fillColor(ink)
      .text('Invoice', L, headerTop, { width: W, align: 'right' }).moveDown(0.2);
 
@@ -126,14 +123,14 @@ export async function buildInvoicePdfBuffer(inv = {}) {
      .text(`Date: ${datePretty}`,                   L, undefined, { width: W, align: 'right' })
      .text(`Due: ${Number(inv?.dueDays ?? 7)} days`,L, undefined, { width: W, align: 'right' });
 
-  // Company block
-  doc.moveDown(compact ? 1.5 : 2);
+  // Company info (left column)
+  doc.moveDown(compact ? 1.6 : 2.0);
   doc.font('Helvetica-Bold').fontSize(12).fillColor(ink).text(inv?.company?.name || 'Company', L, undefined, { width: W });
   doc.font('Helvetica').fontSize(10).fillColor(gray6)
      .text(inv?.company?.address || '', L, undefined, { width: W })
      .text(`${inv?.company?.phone || ''}${inv?.company?.email ? ' • ' + inv.company.email : ''}`, L, undefined, { width: W });
 
-  // Client block
+  // Bill To (right under company block, same as quote)
   doc.moveDown(compact ? 1.0 : 1.2);
   doc.font('Helvetica-Bold').fontSize(11).fillColor(ink).text('Bill To', L, undefined, { width: W });
   doc.font('Helvetica').fontSize(10).fillColor(ink)
@@ -143,7 +140,7 @@ export async function buildInvoicePdfBuffer(inv = {}) {
      .text(inv?.client?.phone || '', L, undefined, { width: W })
      .text(inv?.client?.address || '', L, undefined, { width: W });
 
-  // Totals
+  // Totals math (same as quote)
   const vatRate = Number(inv?.company?.vatRate ?? 0.15);
   const onceSub = Number(inv?.subtotals?.onceOff || 0);
   const monSub  = Number(inv?.subtotals?.monthly || 0);
@@ -153,12 +150,11 @@ export async function buildInvoicePdfBuffer(inv = {}) {
   const monTotal  = monSub + monVat;
   const grandPayNow = onceTotal + monTotal;
 
-  // Summary cards
+  // Summary cards (MONTHLY / ONCE-OFF)
   const yStart = doc.y + (compact ? 10 : 14);
   const gap = 12;
   const cardH = compact ? 44 : 48;
   const cardW = (W - gap) / 2;
-
   const card = (x, y, w, h, title, value, subtitle) => {
     doc.save().roundedRect(x, y, w, h, 12).fill(pill).restore();
     doc.roundedRect(x, y, w, h, 12).strokeColor(line).stroke();
@@ -169,11 +165,11 @@ export async function buildInvoicePdfBuffer(inv = {}) {
          .text(subtitle, x + w - 70, y + 22, { width: 60, align: 'right' });
     }
   };
-  card(L, yStart, cardW, cardH, 'MONTHLY', money(monTotal), '/month');
+  card(L, yStart, cardW, cardH, 'MONTHLY',  money(monTotal),  '/month');
   card(L + cardW + gap, yStart, cardW, cardH, 'ONCE-OFF', money(onceTotal), 'setup');
-
   doc.y = yStart + cardH + (compact ? 12 : 16);
 
+  // Unit text logic (minutes on monthly lines)
   const unitText = (it, monthly) => {
     const looksLikeCalls = /call|minute/i.test(it?.name || '');
     const minutes = it?.minutes;
@@ -184,7 +180,7 @@ export async function buildInvoicePdfBuffer(inv = {}) {
     return money(it?.unit || 0);
   };
 
-  // Table renderer
+  // Generic table renderer (matches quote)
   const table = (title, items = [], subtotalEx, vatAmt, totalInc, monthly = false) => {
     const colW = [ W * 0.58, W * 0.12, W * 0.12, W * 0.18 ];
     const rowH = compact ? 20 : 24;
@@ -262,16 +258,16 @@ export async function buildInvoicePdfBuffer(inv = {}) {
     doc.y = y + (compact ? 4 : 6);
   };
 
-  // First-page stamp
+  // Stamp on first page (if provided)
   paintStamp(inv?.stamp);
 
-  // Sections
+  // Sections (same order as quote)
   table('Once-off Charges', inv?.itemsOnceOff || [], onceSub, onceVat, onceTotal, false);
   doc.moveDown(compact ? 0.6 : 0.8);
   table('Monthly Charges',  inv?.itemsMonthly || [], monSub,  monVat,  monTotal,  true);
   doc.moveDown(compact ? 1.0 : 1.2);
 
-  // Pay-now band
+  // Totals band (Amount Due)
   const yBand = doc.y + 4;
   const bandH = compact ? 30 : 34;
   doc.save().roundedRect(L, yBand, W, bandH, 10).fill(pill).restore();
@@ -282,7 +278,7 @@ export async function buildInvoicePdfBuffer(inv = {}) {
 
   doc.moveDown(compact ? 1.6 : 2.0);
 
-  // Notes
+  // Notes (same copy area as quote; keep short to avoid pagination)
   const blurb = [
     'Included: Professional install & device setup; Remote support; PBX configuration; Number porting assistance. Standard call-out fee: R450.',
     inv?.notes ? `Notes: ${inv.notes}` : '',
@@ -291,7 +287,7 @@ export async function buildInvoicePdfBuffer(inv = {}) {
 
   doc.font('Helvetica').fontSize(9).fillColor(gray6).text(blurb, L, undefined, { width: W });
 
-  // Footer
+  // Footer (mirrors quote)
   const addFooter = () => {
     const y = doc.page.height - 30;
     doc.font('Helvetica').fontSize(9).fillColor(gray4)

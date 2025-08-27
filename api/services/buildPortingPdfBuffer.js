@@ -73,11 +73,12 @@ export async function buildPortingPdfBuffer({ company = {}, client = {}, port = 
   doc.font('Helvetica-Bold').fontSize(11).text('Declaration', 48, y + 4);
   y += 26;
 
-  const decl = [
-    `${company.name || 'VoIP Shop'} is hereby authorised to request that my present service provider port the above numbers to ${company.name || 'VoIP Shop'}. I am duly authorised to make this request and to the best of my knowledge the above information is correct.`,
-    'I acknowledge that the subscriber shall remain liable in terms of any contract with the present service provider for so long as it remains in force.',
-    'Credits and discounts afforded to the subscriber by the present service provider are not transferrable.',
-    'I have been advised of the porting costs and the subscriber agrees to be liable for such costs.'
+ const decl = [
+  'Backspace is hereby authorised to request that my present service provider port the above numbers to Backspace. I am duly authorised to make this request and to the best of my knowledge the above information is correct.',
+  'I acknowledge that the subscriber shall remain liable in terms of any contract with the present service provider for so long as it remains in force.',
+  'Credits and discounts afforded to the subscriber by the present service provider are not transferrable to Backspace.',
+  'I have been advised of the porting costs and the subscriber agrees to be liable for such costs.'
+
   ];
   doc.font('Helvetica').fontSize(10).fillColor(gray600);
   for (let i = 0; i < decl.length; i++) {
