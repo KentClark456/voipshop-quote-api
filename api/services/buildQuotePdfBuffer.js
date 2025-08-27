@@ -1,90 +1,29 @@
-// services/buildQuotePdfBuffer.js
-import PDFDocument from 'pdfkit';
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// ZAR money
-const money = (n) =>
-  'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-// Prefer local logo; fallback to remote if provided
-async function loadLogoBuffer(overrideUrl = '') {
-  const localCandidates = [
-    path.resolve(__dirname, '../Assets/Group 1642logo (1).png'),
-    path.resolve(__dirname, '../../Assets/Group 1642logo (1).png'),
-  ];
-  for (const p of localCandidates) {
-    try {
-      const buf = await fs.readFile(p);
-      if (buf?.length) return buf;
-    } catch {}
-  }
-  try {
-    const url = overrideUrl || '';
-    if (url && typeof fetch === 'function') {
-      const r = await fetch(url, { cache: 'no-store' });
-      if (r.ok) return Buffer.from(await r.arrayBuffer());
-    }
-  } catch {}
-  return null;
-}
-
-/**
- * Build QUOTE PDF buffer — 2-page Apple-ish layout.
- * Page 1: Logo, title, cards (Quote Info, Bill To, Totals), Included/Notes.
- * Page 2: Once-off & Monthly tables, Pay-now band, footer.
- *
- * @param {{
- *   quoteNumber:string, dateISO:string, validDays:number,
- *   client:{name?:string, company?:string, email?:string, phone?:string, address?:string},
- *   itemsOnceOff:Array<{name:string, qty:number, unit:number, minutes?:number}>,
- *   itemsMonthly:Array<{name:string, qty:number, unit:number, minutes?:number}>,
- *   subtotals:{ onceOff:number, monthly:number },
- *   notes?:string, stamp?:string, compact?:boolean,
- *   company:{
- *     name:string, address?:string, phone?:string, email?:string, vatRate:number,
- *     logoUrl?:string,
- *     colors?:{brand?:string, ink?:string, gray6?:string, gray4?:string, line?:string, thbg?:string, pill?:string}
- *   }
- * }} q
- * @returns {Promise<Buffer>}
- */
 export async function buildQuotePdfBuffer(q) {
   const compact = !!q.compact;
 
-  // Theme defaults (gentle, neutral; tweak here if you want)
+  // ---- Theme (soft Apple-ish neutrals) ----
   const theme = {
     brand: q.company?.colors?.brand || '#0B63E6',
     ink:   q.company?.colors?.ink   || '#111111',
     gray6: q.company?.colors?.gray6 || '#4b5563',
     gray4: q.company?.colors?.gray4 || '#6b7280',
     line:  q.company?.colors?.line  || '#e5e7eb',
-    thbg:  q.company?.colors?.thbg  || '#f7f8fa',
+    thbg:  q.company?.colors?.thbg  || '#f5f5f7',
     pill:  q.company?.colors?.pill  || '#f5f5f7',
+    chipBg:'#E7F0FF',
+    chipBd:'#D7E6FF',
+    chipTx:'#0B63E6',
   };
 
-  // Page & margins (wider margins to feel airy)
-  const margin = compact ? 44 : 56;
-  const doc = new PDFDocument({ size: 'A4', margin, bufferPages: true });
-  const chunks = [];
-  doc.on('data', (c) => chunks.push(c));
-  const done = new Promise((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
-
-  // Bounds
-  const L = doc.page.margins.left;
-  const R = doc.page.width - doc.page.margins.right;
-  const W = R - L;
-
-  const { brand, ink, gray6, gray4, line, thbg, pill } = theme;
-
+  // ---- Money / time helpers ----
+  const money = (n) =>
+    'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const datePretty = (() => {
-    try { return new Date(q.dateISO).toISOString().slice(0, 10); } catch { return String(q.dateISO || '').slice(0, 10); }
+    try { return new Date(q.dateISO).toISOString().slice(0,10); }
+    catch { return String(q.dateISO || '').slice(0,10); }
   })();
 
+  // ---- Totals ----
   const vatRate = Number(q.company?.vatRate ?? 0.15);
   const onceSub = Number(q.subtotals?.onceOff || 0);
   const monSub  = Number(q.subtotals?.monthly || 0);
@@ -94,275 +33,350 @@ export async function buildQuotePdfBuffer(q) {
   const monTotal  = monSub + monVat;
   const grandPayNow = onceTotal + monTotal;
 
-  // ---------- Small helpers ----------
-  const spacer = (h) => { doc.y += h; };
-  const rule = (y, thick = 1) => {
-    doc.save().moveTo(L, y).lineTo(R, y).lineWidth(thick).strokeColor(line).stroke().restore();
-  };
-  const sectionTitle = (title, y = doc.y) => {
-    doc.font('Helvetica-Bold').fontSize(compact ? 12 : 13).fillColor(ink)
-       .text(title, L, y, { width: W });
-    spacer(compact ? 6 : 8);
-  };
-  const caption = (text, x, y, width = 200, align = 'left') => {
-    doc.font('Helvetica').fontSize(9).fillColor(gray6)
-       .text(text, x, y, { width, align });
-  };
-  const label = (text, x, y, width = 200, align = 'left') => {
-    doc.font('Helvetica').fontSize(10).fillColor(gray6)
-       .text(text, x, y, { width, align });
-  };
-  const value = (text, x, y, width = 200, align = 'left', bold = false) => {
-    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(11).fillColor(ink)
-       .text(text, x, y, { width, align });
-  };
+  // ---- PDF ----
+  const margin = compact ? 44 : 56;
+  const doc = new PDFDocument({ size: 'A4', margin });
+  const chunks = [];
+  doc.on('data', (c) => chunks.push(c));
+  const done = new Promise((r) => doc.on('end', () => r(Buffer.concat(chunks))));
 
+  const L = doc.page.margins.left;
+  const R = doc.page.width - doc.page.margins.right;
+  const T = doc.page.margins.top;
+  const B = doc.page.height - doc.page.margins.bottom;
+  const W = R - L;
+
+  const { brand, ink, gray6, gray4, line, thbg, pill, chipBg, chipBd, chipTx } = theme;
+
+  // ---------------- Shared UI helpers ----------------
+  const spacer = (h) => { doc.y += h; };
   const card = ({ x, y, w, h, radius = 14, fill = pill, stroke = line }) => {
     doc.save().roundedRect(x, y, w, h, radius).fill(fill).restore();
     doc.save().roundedRect(x, y, w, h, radius).lineWidth(1).strokeColor(stroke).stroke().restore();
   };
-
+  const measure = (text, opt) => doc.heightOfString(String(text || ''), opt);
+  const label = (t, x, y, w = 200) => { doc.font('Helvetica').fontSize(10).fillColor(gray6).text(t, x, y, { width: w }); };
+  const value = (t, x, y, w = 200, bold=false) => { doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(11).fillColor(ink).text(t, x, y, { width: w }); };
+  const caption = (t, x, y, w = 200) => { doc.font('Helvetica').fontSize(9).fillColor(gray6).text(t, x, y, { width: w }); };
   const chip = (txt, x, y) => {
     const padX = 8, padY = 4;
-    const width = doc.widthOfString(txt) + padX * 2;
-    const height = 16 + padY;
-    doc.save().roundedRect(x, y, width, height, 10).fill('#E7F0FF').restore();
-    doc.save().roundedRect(x, y, width, height, 10).strokeColor('#D7E6FF').stroke().restore();
-    doc.font('Helvetica-Bold').fontSize(9).fillColor('#0B63E6').text(txt, x + padX, y + 5);
-    return { w: width, h: height };
+    const w = doc.widthOfString(txt) + padX*2, h = 16+padY;
+    doc.save().roundedRect(x,y,w,h,10).fill(chipBg).restore();
+    doc.save().roundedRect(x,y,w,h,10).strokeColor(chipBd).stroke().restore();
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(chipTx).text(txt, x+padX, y+5);
+    return { w, h };
   };
-
   const unitText = (it, monthly) => {
     const looksLikeCalls = /call|minute/i.test(it.name);
-    const minutes = it.minutes;
-    if (monthly && (minutes != null || looksLikeCalls)) {
-      const m = Number(minutes) || 0;
+    if (monthly && (it.minutes != null || looksLikeCalls)) {
+      const m = Number(it.minutes||0);
       return m > 0 ? `${m} minutes` : 'Included minutes';
     }
     return money(it.unit);
   };
-
   const addFooter = () => {
-    const y = doc.page.height - 32;
+    const y = B + 8;
     doc.font('Helvetica').fontSize(9).fillColor(gray4)
       .text(`${q.company.name} • ${q.company.email || ''} • ${q.company.phone || ''}`, L, y, { width: W, align: 'left' })
       .text(`Page ${doc.page.number}`, L, y, { width: W, align: 'right' });
   };
 
-  const paintStamp = (text) => {
-    if (!text) return;
-    doc.save();
-    doc.rotate(-30, { origin: [doc.page.width / 2, doc.page.height / 2] });
-    doc.font('Helvetica-Bold').fontSize(90).fillColor('#EEF2FF').opacity(0.7)
-       .text(text, doc.page.width * 0.1, doc.page.height * 0.25, { width: doc.page.width * 0.8, align: 'center' });
-    doc.opacity(1).restore();
-  };
-
-  // ---------- HEADER (Page 1) ----------
-  // Thin brand bar
+  // ---------------- PAGE 1 ----------------
+  // Top brand hairline
   doc.save().rect(0, 0, doc.page.width, 6).fill(brand).restore();
 
-  const headerTop = 26;
-  const logoBuf = await loadLogoBuffer(q.company?.logoUrl);
-  if (logoBuf) {
-    try { doc.image(logoBuf, L, headerTop, { width: compact ? 128 : 148 }); } catch {}
-  } else {
-    doc.font('Helvetica-Bold').fontSize(16).fillColor(ink).text(q.company?.name || 'Company', L, headerTop);
-  }
+  // Header
+  const headerGap = 16;
+  const logoBuf = await (async () => {
+    try {
+      const local = [
+        path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../Assets/Group 1642logo (1).png'),
+        path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../Assets/Group 1642logo (1).png'),
+      ];
+      for (const p of local) {
+        try { const b = await fs.readFile(p); if (b?.length) return b; } catch {}
+      }
+      if (q.company?.logoUrl && typeof fetch === 'function') {
+        const r = await fetch(q.company.logoUrl, { cache: 'no-store' });
+        if (r.ok) return Buffer.from(await r.arrayBuffer());
+      }
+    } catch {}
+    return null;
+  })();
 
-  // Right side: Quote title + meta
+  let y = T + 22;
+  if (logoBuf) { try { doc.image(logoBuf, L, y, { width: compact ? 120 : 140 }); } catch {} }
+  else { doc.font('Helvetica-Bold').fontSize(16).fillColor(ink).text(q.company?.name || 'Company', L, y); }
+
+  // Right side meta
   const titleX = L + (compact ? 260 : 280);
   const titleW = R - titleX;
   doc.font('Helvetica-Bold').fontSize(compact ? 22 : 24).fillColor(ink)
-     .text('Quote', titleX, headerTop, { width: titleW, align: 'right' });
-  spacer(compact ? 0 : 2);
+     .text('Quote', titleX, y, { width: titleW, align: 'right' });
   doc.font('Helvetica').fontSize(10).fillColor(gray6)
-     .text(`Quote #: ${q.quoteNumber}`, titleX, doc.y, { width: titleW, align: 'right' })
-     .text(`Date: ${datePretty}`,      titleX, doc.y,   { width: titleW, align: 'right' })
+     .text(`Quote #: ${q.quoteNumber}`, titleX, doc.y + 2, { width: titleW, align: 'right' })
+     .text(`Date: ${datePretty}`,       titleX, doc.y,     { width: titleW, align: 'right' })
      .text(`Valid: ${Number(q.validDays || 7)} days`, titleX, doc.y, { width: titleW, align: 'right' });
 
-  spacer(compact ? 14 : 18);
+  y = Math.max(doc.y, y) + headerGap;
 
-  // ---------- PAGE 1 CARDS GRID ----------
-  // Grid: 3 cards side-by-side (stack if narrow margins)
-  const gap = 12;
-  const col = (W - gap * 2) / 3;
-  let y = Math.max(doc.y + (compact ? 10 : 14), headerTop + (compact ? 72 : 78));
+  // ---- Cards grid (2 columns, balanced) ----
+  const GAP = 12;
+  const colW = (W - GAP) / 2;
 
-  // Card A: Quote Info
-  const aH = compact ? 108 : 120;
-  card({ x: L, y, w: col, h: aH });
-  caption('Quote Info', L + 14, y + 10);
-  let ty = y + 30;
-  label('Company', L + 14, ty);   value(q.company?.name || '', L + 14, ty + 13, col - 28); ty += 32;
-  label('Email',   L + 14, ty);   value(q.company?.email || '', L + 14, ty + 13, col - 28); ty += 32;
-  label('Phone',   L + 14, ty);   value(q.company?.phone || '', L + 14, ty + 13, col - 28);
+  // Measure heights first, then draw backgrounds, then text (to avoid oversizing/overflow)
+  // Card 1: Bill To
+  const billToTitle = 'Bill To';
+  const billToBody = [
+    q.client?.name,
+    q.client?.company,
+    q.client?.email,
+    q.client?.phone,
+    q.client?.address
+  ].filter(Boolean).join('\n');
 
-  // Card B: Bill To
-  card({ x: L + col + gap, y, w: col, h: aH });
-  caption('Bill To', L + col + gap + 14, y + 10);
-  ty = y + 30;
-  value(q.client?.name || '',     L + col + gap + 14, ty, col - 28, 'left', true); ty += 20;
-  value(q.client?.company || '',  L + col + gap + 14, ty, col - 28); ty += 16;
-  label('Email',  L + col + gap + 14, ty); value(q.client?.email || '',  L + col + gap + 14, ty + 13, col - 28); ty += 32;
-  label('Phone',  L + col + gap + 14, ty); value(q.client?.phone || '',  L + col + gap + 14, ty + 13, col - 28);
+  const billTitleH = measure(billToTitle, { width: colW - 28 });
+  const billBodyH  = measure(billToBody,  { width: colW - 28 });
+  const card1H = 24 + billTitleH + 6 + billBodyH + 10;
 
-  // Card C: Totals
-  const cH = compact ? 108 : 120;
-  card({ x: L + (col + gap) * 2, y, w: col, h: cH });
-  const cx = L + (col + gap) * 2 + 14;
-  caption('Totals (incl. VAT)', cx, y + 10);
-  ty = y + 32;
-  label('Monthly', cx, ty);     value(money(monTotal), cx, ty + 13, col - 28, 'left', true); ty += 34;
-  label('Once-off', cx, ty);    value(money(onceTotal), cx, ty + 13, col - 28, 'left', true); ty += 34;
+  // Card 2: Quote Info
+  const qInfoTitle = 'Quote Info';
+  const qInfoLines = [
+    ['Company', q.company?.name || ''],
+    ['Email',   q.company?.email || ''],
+    ['Phone',   q.company?.phone || ''],
+    ['Address', q.company?.address || ''],
+  ];
+  const qInfoTitleH = measure(qInfoTitle, { width: colW - 28 });
+  const qInfoBodyH  = qInfoLines.reduce((h,[lbl,val]) => {
+    return h + measure(lbl, { width: colW - 28 }) + measure(val, { width: colW - 28 }) + 6;
+  }, 0);
+  const card2H = 24 + qInfoTitleH + 6 + qInfoBodyH + 6;
 
-  // Badges
-  chip('VAT included', cx, y + cH - 24);
+  // Draw row 1 backgrounds
+  card({ x: L,           y, w: colW, h: card1H });
+  card({ x: L + colW+GAP, y, w: colW, h: card2H });
 
-  y += Math.max(aH, cH);
-  spacer(compact ? 14 : 18);
+  // Populate row 1
+  caption(billToTitle, L+14, y+10); doc.font('Helvetica').fontSize(10).fillColor(ink)
+    .text(billToBody, L+14, y+10+billTitleH+6, { width: colW-28 });
+  const y2 = y;
+  caption(qInfoTitle, L+colW+GAP+14, y2+10);
+  let ty = y2+10+qInfoTitleH+6;
+  for (const [lbl,val] of qInfoLines) {
+    label(lbl, L+colW+GAP+14, ty, colW-28); ty += 13;
+    value(val, L+colW+GAP+14, ty, colW-28); ty += 19;
+  }
 
-  // Card D: Included / Notes (full-width)
-  const dH = compact ? 110 : 120;
-  card({ x: L, y, w: W, h: dH });
-  caption('What’s Included', L + 14, y + 10);
-  const blurb = [
+  y = Math.max(y + card1H, y2 + card2H) + GAP;
+
+  // Card 3: Totals (full width, balanced row)
+  const totalsTitle = 'Totals (incl. VAT)';
+  const totalsH = 24 + measure(totalsTitle, { width: W-28 }) + 36 + 10;
+  card({ x: L, y, w: W, h: totalsH });
+  caption(totalsTitle, L+14, y+10);
+  label('Monthly', L+14, y+10+18); value(money(monTotal), L+14, y+10+31, 200, true);
+  label('Once-off', L+200, y+10+18); value(money(onceTotal), L+200, y+10+31, 200, true);
+  chip('VAT included', R-120, y+totalsH-24);
+
+  y += totalsH + GAP;
+
+  // Card 4: Included / Notes (full width)
+  const inclTitle = 'What’s Included';
+  const inclPoints = [
     '• Professional install & device setup',
     '• Remote support',
     '• PBX configuration',
     '• Number porting assistance',
-    '• Standard call-out fee: R450',
+    '• Standard call-out fee: R450'
   ].join('\n');
+  const inclTitleH = measure(inclTitle, { width: W-28 });
+  const inclTextH  = measure(inclPoints, { width: (W-28)/2 });
 
-  doc.font('Helvetica').fontSize(10).fillColor(ink)
-     .text(blurb, L + 14, y + 30, { width: W - 28 });
+  const notesTitle = q.notes ? 'Notes' : '';
+  const notesTextH = q.notes ? measure(q.notes, { width: (W-28)/2 }) : 0;
 
-  if (q.notes) {
-    const nx = L + (W * 0.52);
-    const nw = W - (nx - L) - 14;
-    caption('Notes', nx, y + 10);
+  // keep card height balanced between columns
+  const innerTopPad = 10, innerGap = 8, bottomPad = 12;
+  const colLeftH  = inclTitleH + innerGap + inclTextH;
+  const colRightH = (q.notes ? (measure(notesTitle, { width: (W-28)/2 }) + innerGap + notesTextH) : 0);
+  const innerH = Math.max(colLeftH, colRightH);
+  const card4H = 24 + innerH + bottomPad;
+
+  // If Page 1 is getting tight, clip card 4 a bit by shrinking innerH (but still looks good)
+  let remaining = B - (y + card4H + 36);
+  if (remaining < 0) {
+    // reduce inner height smoothly
+    const reduceBy = Math.min(innerH * 0.25, Math.abs(remaining) + 12);
+    const newInnerH = innerH - reduceBy;
+    const ratio = newInnerH / innerH;
+    // proportionally reduce columns (simple approach)
+    const newInclH = Math.floor(inclTextH * ratio);
+    const newNotesH = q.notes ? Math.floor(notesTextH * ratio) : 0;
+    // recompute card4H
+    const colLeftH2 = inclTitleH + innerGap + newInclH;
+    const colRightH2 = q.notes ? (measure(notesTitle, { width: (W-28)/2 }) + innerGap + newNotesH) : 0;
+    const innerH2 = Math.max(colLeftH2, colRightH2);
+    const card4H2 = 24 + innerH2 + bottomPad;
+
+    card({ x: L, y, w: W, h: card4H2 });
+    // left column
+    caption(inclTitle, L+14, y+10);
     doc.font('Helvetica').fontSize(10).fillColor(ink)
-       .text(q.notes, nx, y + 30, { width: nw });
+       .text(inclPoints, L+14, y+10+inclTitleH+innerGap, { width: (W-28)/2, height: newInclH });
+    // right column
+    if (q.notes) {
+      caption('Notes', L+14 + (W-28)/2 + 14, y+10);
+      doc.font('Helvetica').fontSize(10).fillColor(ink)
+         .text(q.notes, L+14 + (W-28)/2 + 14, y+10+measure('Notes',{width:(W-28)/2})+innerGap, {
+           width: (W-28)/2 - 14, height: newNotesH
+         });
+    }
+    y += card4H2;
+  } else {
+    // normal draw
+    card({ x: L, y, w: W, h: card4H });
+    caption(inclTitle, L+14, y+10);
+    doc.font('Helvetica').fontSize(10).fillColor(ink)
+       .text(inclPoints, L+14, y+10+inclTitleH+innerGap, { width: (W-28)/2 });
+
+    if (q.notes) {
+      const nx = L+14 + (W-28)/2 + 14;
+      caption('Notes', nx, y+10);
+      doc.font('Helvetica').fontSize(10).fillColor(ink)
+         .text(q.notes, nx, y+10+measure('Notes',{width:(W-28)/2})+innerGap, { width: (W-28)/2 - 14 });
+    }
+    y += card4H;
   }
 
-  // Footer & stamp for Page 1
-  paintStamp(q.stamp);
+  // Footer page 1
+  doc.y = y + 18;
   addFooter();
 
-  // ---------- Force Page Break (start Page 2) ----------
+  // ---------------- PAGE 2 (only once) ----------------
   doc.addPage();
-  paintStamp(q.stamp);
 
-  // Repeat thin brand bar for continuity
+  // hairline
   doc.save().rect(0, 0, doc.page.width, 6).fill(brand).restore();
+  let y2p = T + 20;
 
-  spacer(compact ? 16 : 20);
-  sectionTitle('Details');
+  // Section title
+  doc.font('Helvetica-Bold').fontSize(13).fillColor(ink).text('Details', L, y2p); y2p = doc.y + 10;
 
-  // ---------- TABLES (Page 2) ----------
+  // ---- Table renderer that COMPRESSES to fit remaining space ----
   const renderTable = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
     const colW = [ W * 0.60, W * 0.12, W * 0.12, W * 0.16 ];
-    const rowH = compact ? 20 : 24;
     const headH = compact ? 18 : 20;
+    let rowH = compact ? 19 : 22; // start roomy; we may compact later
+    const padX = 14;
 
-    // Section card
-    const cardTop = doc.y;
-    let innerY = cardTop + (compact ? 8 : 10);
-    const paddingX = 14;
-    const minBodyH = (items?.length || 0) * rowH + headH + (compact ? 62 : 70);
-    const estCardH = Math.max(minBodyH, compact ? 120 : 132);
+    // Title height + header
+    const titleH = measure(title, { width: W - padX*2 });
+    const totalsBlockH = (compact ? 40 : 46); // subtotal + VAT + total lines
 
-    // Draw card block
-    card({ x: L, y: cardTop, w: W, h: estCardH });
-    // Title
-    doc.font('Helvetica-Bold').fontSize(12).fillColor(ink).text(title, L + paddingX, innerY);
-    innerY += compact ? 6 : 8;
+    // Compute how many rows we can fit in the **remaining space on Page 2**
+    const space = (B - 24) - (y2p + 24 + titleH + headH + 8 + totalsBlockH + 16);
+    let maxRows = Math.max(0, Math.floor(space / rowH));
 
-    // Header row
-    doc.save().rect(L, innerY, W, headH).fill(thbg).restore();
+    if (maxRows < items.length) {
+      // try a gentle compaction
+      rowH = Math.max(16, rowH - 3);
+      const space2 = (B - 24) - (y2p + 24 + titleH + headH + 8 + totalsBlockH + 16);
+      maxRows = Math.max(0, Math.floor(space2 / rowH));
+    }
+
+    const visible = items.slice(0, maxRows);
+    const hiddenCount = Math.max(0, items.length - visible.length);
+
+    // Card height (calculated)
+    const bodyH = (visible.length ? visible.length * rowH : rowH);
+    const cardH = 24 + titleH + 8 + headH + 2 + bodyH + 10 + totalsBlockH + 10;
+
+    // If even the empty skeleton won’t fit, shrink fonts slightly
+    if (y2p + cardH > B - 12) {
+      doc.fontSize(10); // global-ish small nudge
+    }
+
+    // Draw card
+    card({ x: L, y: y2p, w: W, h: Math.min(cardH, B - y2p - 12) });
+    caption(title, L+padX, y2p+10);
+
+    // Header
+    let yT = y2p + 10 + titleH + 8;
+    doc.save().rect(L, yT, W, headH).fill(thbg).restore();
     doc.font('Helvetica-Bold').fontSize(10).fillColor(ink);
-    const headY = innerY + (compact ? 3 : 5);
-    doc.text('Description', L + paddingX, headY, { width: colW[0] - (paddingX + 2) });
-    doc.text('Qty',         L + colW[0],   headY, { width: colW[1], align: 'right' });
+    const headY = yT + (compact ? 3 : 5);
+    doc.text('Description', L + padX, headY, { width: colW[0] - (padX + 2) });
+    doc.text('Qty',         L + colW[0], headY, { width: colW[1], align: 'right' });
     doc.text('Unit',        L + colW[0] + colW[1], headY, { width: colW[2], align: 'right' });
-    doc.text('Amount',      L + colW[0] + colW[1] + colW[2], headY, { width: colW[3] - paddingX, align: 'right' });
-
-    doc.moveTo(L, innerY + headH).lineTo(R, innerY + headH).strokeColor(line).stroke();
-    innerY += headH + 2;
+    doc.text('Amount',      L + colW[0] + colW[1] + colW[2], headY, { width: colW[3] - padX, align: 'right' });
+    doc.moveTo(L, yT + headH).lineTo(R, yT + headH).strokeColor(line).stroke();
 
     // Body
+    yT += headH + 2;
     doc.font('Helvetica').fontSize(10).fillColor(ink);
     const zebra = ['#ffffff', '#fbfdff'];
-    let rowIndex = 0;
+    let i = 0;
 
-    if (!items?.length) {
-      doc.text('No items.', L + paddingX, innerY, { width: W - paddingX * 2 });
-      innerY += rowH;
+    if (!visible.length) {
+      doc.text('No items.', L + padX, yT, { width: W - padX*2 });
+      yT += rowH;
     } else {
-      for (const it of items) {
-        // row background
-        doc.save().rect(L, innerY, W, rowH).fill(zebra[rowIndex % 2]).restore();
-        rowIndex++;
-        const yTxt = innerY + (compact ? 4 : 6);
+      for (const it of visible) {
+        doc.save().rect(L, yT, W, rowH).fill(zebra[i % 2]).restore();
+        const yTxt = yT + (rowH <= 18 ? 3 : 5);
         const qty    = Number(it.qty || 1);
         const amount = (Number(it.unit) || 0) * qty;
 
-        doc.text(String(it.name || ''), L + paddingX, yTxt, { width: colW[0] - (paddingX + 2) });
+        doc.text(String(it.name || ''), L + padX, yTxt, { width: colW[0] - (padX + 2) });
         doc.text(String(qty),           L + colW[0], yTxt,   { width: colW[1], align: 'right' });
         doc.text(unitText(it, monthly), L + colW[0] + colW[1], yTxt, { width: colW[2], align: 'right' });
-        doc.text(money(amount),         L + colW[0] + colW[1] + colW[2], yTxt, { width: colW[3] - paddingX, align: 'right' });
+        doc.text(money(amount),         L + colW[0] + colW[1] + colW[2], yTxt, { width: colW[3] - padX, align: 'right' });
 
-        innerY += rowH;
+        yT += rowH; i++;
+      }
+      if (hiddenCount > 0) {
+        doc.save().rect(L, yT, W, rowH).fill(zebra[i % 2]).restore();
+        doc.font('Helvetica-Oblique').fontSize(9).fillColor(gray6)
+           .text(`+ ${hiddenCount} more item${hiddenCount>1?'s':''} included in totals`, L + padX, yT + (rowH<=18?3:5), { width: W - padX*2 });
+        yT += rowH;
       }
     }
 
-    // Totals inside the card
-    doc.moveTo(L, innerY).lineTo(R, innerY).strokeColor(line).stroke();
-    innerY += compact ? 8 : 10;
-
-    const labelW = compact ? 130 : 140;
-    const valW   = compact ? 110 : 120;
-    const valX   = R - paddingX - valW;
-    const labelX = valX - labelW - 8;
-
-    const totalLine = (lbl, val, bold = false) => {
+    // Totals
+    doc.moveTo(L, yT).lineTo(R, yT).strokeColor(line).stroke();
+    yT += 8;
+    const labelW = 140, valW = 120, valX = R - padX - valW, labelX = valX - labelW - 8;
+    const tLine = (lbl, val, bold=false) => {
       doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10).fillColor(bold ? ink : gray6)
-        .text(lbl, labelX, innerY, { width: labelW, align: 'right' });
+        .text(lbl, labelX, yT, { width: labelW, align: 'right' });
       doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(ink)
-        .text(money(val), valX, innerY, { width: valW, align: 'right' });
-      innerY += compact ? 14 : 16;
+        .text(money(val), valX, yT, { width: valW, align: 'right' });
+      yT += 15;
     };
+    tLine('Subtotal', subtotalEx);
+    tLine(`VAT (${Math.round(vatRate*100)}%)`, vatAmt);
+    tLine(monthly ? 'Total / month' : 'Total (once-off)', totalInc, true);
 
-    totalLine('Subtotal', subtotalEx);
-    totalLine(`VAT (${Math.round(vatRate * 100)}%)`, vatAmt);
-    totalLine(monthly ? 'Total / month' : 'Total (once-off)', totalInc, true);
-
-    // Adjust doc.y to end of card
-    const cardBottom = Math.max(innerY + (compact ? 8 : 10), cardTop + estCardH);
-    doc.y = cardBottom + (compact ? 12 : 16);
+    y2p = yT + 6 + 10; // card padding bottom + gap
   };
 
   renderTable('Once-off Charges', q.itemsOnceOff || [], onceSub, onceVat, onceTotal, false);
   renderTable('Monthly Charges',  q.itemsMonthly || [], monSub,  monVat,  monTotal,  true);
 
-  // ---------- Pay-now band (subtle pill) ----------
-  const bandH = compact ? 34 : 38;
-  const bandY = doc.y;
-  card({ x: L, y: bandY, w: W, h: bandH, radius: 12 });
+  // Pay-now band (always fits; compact if needed)
+  const bandH = 36, by = Math.min(y2p, B - bandH - 14);
+  card({ x: L, y: by, w: W, h: bandH, radius: 12 });
   doc.font('Helvetica-Bold').fontSize(12).fillColor(ink)
-     .text('Pay now (incl VAT)', L + 14, bandY + (compact ? 7 : 9));
+     .text('Pay now (incl VAT)', L+14, by+9);
   doc.font('Helvetica-Bold').fontSize(12).fillColor(ink)
-     .text(money(grandPayNow), L, bandY + (compact ? 7 : 9), { width: W - 14, align: 'right' });
+     .text(money(grandPayNow), L, by+9, { width: W-14, align: 'right' });
 
-  // Footer
+  // Footer page 2
+  doc.y = B - 18;
   addFooter();
 
-  // Page-added hook to keep footer/stamp consistent
-  doc.on('pageAdded', () => {
-    paintStamp(q.stamp);
-    addFooter();
-  });
-
+  // End (no further pages allowed)
   doc.end();
   return done;
 }
