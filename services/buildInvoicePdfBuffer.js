@@ -14,8 +14,10 @@ const money = (n) =>
 // Prefer local logo; fallback to remote if provided
 async function loadLogoBuffer(overrideUrl = '') {
   const localCandidates = [
-    path.resolve(__dirname, '../Assets/Group 1642logo (1).png'),
-    path.resolve(__dirname, '../../Assets/Group 1642logo (1).png')
+    // correct relative path + correct case from /api/services to /api/assets
+    path.resolve(__dirname, '../assets/Group 1642logo (1).png'),
+    // optional extra safety if your build layout ever shifts:
+    path.resolve(__dirname, '../../assets/Group 1642logo (1).png'),
   ];
   for (const p of localCandidates) {
     try {

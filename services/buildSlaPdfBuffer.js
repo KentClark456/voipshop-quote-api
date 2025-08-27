@@ -1,6 +1,14 @@
 // services/buildSlaPdfBuffer.js
 import PDFDocument from 'pdfkit';
 import { drawLogoHeader } from '../../utils/pdf-branding.js';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// From /api/services -> /api/assets  (check case: "assets" vs "Assets")
+const LOCAL_LOGO = path.resolve(__dirname, '../assets/Group 1642logo (1).png');
 
 export async function buildSlaPdfBuffer(params = {}) {
   const {
@@ -169,11 +177,9 @@ export async function buildSlaPdfBuffer(params = {}) {
   };
 
 // ---- Header (Page 1) ----
-const ABS_LOGO = '/Users/shenaidclark/Desktop/voipshop-quote-api/api/assets/Group 1642logo (1).png';
-
 y = await drawLogoHeader(doc, {
-  logoUrl: company?.logoUrl || `file://${ABS_LOGO}`,   // ✅ fallback to your absolute path
-  localLogoHints: [ ABS_LOGO ],                        // ✅ optional hint list
+  logoUrl: company?.logoUrl,       // try remote first if provided
+  localLogoHints: [ LOCAL_LOGO ],  // then try bundled local file
   align: 'right',
   title: 'Service Level Agreement',
   subtitle: company?.website || '',
@@ -182,7 +188,6 @@ y = await drawLogoHeader(doc, {
 });
 y = Math.max(y, 70);
 doc.y = y;
-
 
 
   // ---- Meta strip
@@ -389,8 +394,8 @@ doc.y = y;
 // =========================
 doc.addPage();
 y = await drawLogoHeader(doc, {
-  logoUrl: company?.logoUrl || `file://${ABS_LOGO}`,
-  localLogoHints: [ ABS_LOGO ],
+  logoUrl: company?.logoUrl,
+  localLogoHints: [ LOCAL_LOGO ],
   align: 'right',
   title: 'Terms & Conditions',
   subtitle: company?.website || '',
