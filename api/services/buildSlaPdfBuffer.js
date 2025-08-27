@@ -215,146 +215,63 @@ drawTwoUpCard('Parties — Details (Fill In)',
   }
 );
 
-// ---- Services Ordered — derive + pricing table (slimmer; auto row clamp)
-const deriveServices = () => {
-  if (Array.isArray(services) && services.length) return services;
-  if (!Array.isArray(itemsMonthly) || !itemsMonthly.length) return [];
-  const globMin = Number(minutesIncluded || 0);
-  return itemsMonthly.map(it => {
-    const name = String(it?.name || '');
-    const looksLikeCalls = /call|min(ute)?s?/i.test(name);
-    const mins = Number(
-      it?.minutes ??
-      it?.minutesIncluded ??
-      it?.includedMinutes ??
-      0
-    ) || (looksLikeCalls ? globMin : 0);
-    const unitPrice = Number(it?.unit);
-    const qtyBase   = looksLikeCalls ? (mins || 0) : Number(it?.qty || 1);
-    const qty       = Number.isFinite(qtyBase) && qtyBase > 0 ? qtyBase : 1;
-    return {
-      name,
-      qty,
-      unitPrice: Number.isFinite(unitPrice) ? unitPrice : 0,
-      note: looksLikeCalls && mins ? `Includes ${mins} minutes` : ''
-    };
-  });
+// ---- Services Ordered — constants (shrink rows & reserved blocks)
+const rowH       = 10;   // was 11
+const FEES_MIN   = 54;   // was 72  -> shrink Fees card
+const DEBIT_MIN  = 128;  // was 150 -> more room for it by needing less reserve
+const INITIALS   = 24;   // was 28  -> slightly tighter initials line
+const FUDGE_HDR  = 28;   // was 40  -> tighter “header/totals” fudge
+
+// ↓ Inside the service rows loop, shrink note spacing
+if (it.note) {
+  const noteH = doc.heightOfString(it.note, { width: cW[0], lineGap: 0.1 });
+  doc.font('Helvetica-Oblique').fillColor(MUTED)
+     .text(it.note, rx[0], y - 1, { width: cW[0], lineGap: 0.1 });
+  doc.font('Helvetica').fillColor(MUTED);
+  moveY(Math.min(6, noteH)); // was Math.min(10, noteH)
+}
+
+// ---- Totals (monthly) — reduce padding and line spacing
+moveY(2); // was 3
+doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#E5E7EB').lineWidth(1).stroke();
+moveY(3); // was 5
+
+const labelW = 112; // was 120
+const valW   = 104; // was 110
+const valX   = x + w - valW;
+const labX   = valX - labelW - 6;
+
+const line = (label, val, bold=false) => {
+  doc.font(bold ? 'Helvetica-Bold' : 'Helvetica')
+     .fontSize(bold ? 8.4 : 8)                 // slightly smaller
+     .fillColor(bold ? INK : MUTED)
+     .text(label, labX, y, { width: labelW, align: 'right' });
+  doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(INK)
+     .text(money(val), valX, y, { width: valW, align: 'right' });
+  moveY(bold ? 9 : 8);                         // was 12
 };
-const svc = deriveServices();
 
-drawCard('Services Ordered (Monthly)', ({ x, w }) => {
-  // Column widths: Description, Qty, Unit Price, Line Total
-  const cW = [ w * 0.52, w * 0.12, w * 0.16, w * 0.20 ];
-  const rx = [ x, x + cW[0], x + cW[0] + cW[1], x + cW[0] + cW[1] + cW[2] ];
-
-  // Header row
-  doc.font('Helvetica-Bold').fontSize(8.2).fillColor(INK);
-  doc.text('Description', rx[0], y, { width: cW[0] });
-  doc.text('Qty',         rx[1], y, { width: cW[1], align: 'right' });
-  doc.text('Unit Price',  rx[2], y, { width: cW[2], align: 'right' });
-  doc.text('Line Total',  rx[3], y, { width: cW[3], align: 'right' });
-  moveY(9);
-  doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#D1D5DB').lineWidth(1).stroke();
-  moveY(5);
-
-  if (!svc.length) {
-    doc.font('Helvetica').fontSize(7.8).fillColor(MUTED)
-       .text('No monthly service lines were supplied. (Pass `services` OR `itemsMonthly` + `minutesIncluded`.)', x, y, { width: w });
-    moveY(10);
-    return;
-  }
-
-  // Dynamically cap rows so Debit Mandate always fits later
-  const rowH = 11;                   // tighter row height
-  const FEES_MIN   = 72;             // reserved height for Fees card
-  const DEBIT_MIN  = 150;            // reserved height for Debit card
-  const INITIALS   = 28;             // initials line at bottom of page
-  const FUDGE_HDR  = 40;             // table totals etc
-  const reservedBelow = FEES_MIN + DEBIT_MIN + INITIALS + 20;
-
-  const roomForRows = (pageBottom() - FOOTER_H - reservedBelow) - y - FUDGE_HDR;
-  let maxRows = Math.max(0, Math.min(6, Math.floor(roomForRows / rowH)));
-
-  doc.font('Helvetica').fontSize(7.8).fillColor(MUTED);
-  let subtotal = 0;
-  let rendered = 0;
-
-  for (let i = 0; i < svc.length && rendered < maxRows; i++) {
-    const it = svc[i];
-    const lineTotal = (Number(it.unitPrice) || 0) * (Number(it.qty) || 0);
-    subtotal += Number.isFinite(lineTotal) ? lineTotal : 0;
-
-    doc.text(it.name || '',         rx[0], y, { width: cW[0] });
-    doc.text(String(it.qty || 0),   rx[1], y, { width: cW[1], align: 'right' });
-    doc.text(it.unitPrice > 0 ? money(it.unitPrice) : '—', rx[2], y, { width: cW[2], align: 'right' });
-    doc.text(money(lineTotal),      rx[3], y, { width: cW[3], align: 'right' });
-    moveY(rowH);
-
-    if (it.note) {
-      const noteH = doc.heightOfString(it.note, { width: cW[0], lineGap: 0.2, continued: false });
-      doc.font('Helvetica-Oblique').fillColor(MUTED)
-         .text(it.note, rx[0], y - 1, { width: cW[0], lineGap: 0.2 });
-      doc.font('Helvetica').fillColor(MUTED);
-      moveY(Math.min(10, noteH));  // cap note height
-    }
-    rendered++;
-  }
-
-  const remaining = Math.max(0, svc.length - rendered);
-  if (remaining > 0) {
-    doc.font('Helvetica-Oblique').fontSize(7.8).fillColor(MUTED)
-       .text(`+${remaining} more item(s) included in totals`, x, y, { width: w });
-    moveY(9);
-    doc.font('Helvetica').fontSize(7.8).fillColor(MUTED);
-  }
-
-  // Totals (monthly)
-  const vat = subtotal * Number(vatRate || 0);
-  const total = subtotal + vat;
-
-  moveY(3);
-  doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#E5E7EB').lineWidth(1).stroke();
-  moveY(5);
-
-  const labelW = 120;
-  const valW   = 110;
-  const valX   = x + w - valW;
-  const labX   = valX - labelW - 8;
-
-  const line = (label, val, bold=false) => {
-    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8.6).fillColor(bold ? INK : MUTED)
-       .text(label, labX, y, { width: labelW, align: 'right' });
-    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(INK)
-       .text(money(val), valX, y, { width: valW, align: 'right' });
-    moveY(12);
-  };
-
-  line('Monthly Subtotal (ex VAT)', subtotal);
-  line(`VAT (${Math.round(Number(vatRate||0)*100)}%)`, vat);
-  line('Monthly Total (incl VAT)', total, true);
-}, { minHeight: 96 });
-
-// ---- Fees & Billing (even more compact)
-const ex  = Number.isFinite(monthlyExVat) ? monthlyExVat : 0;
-const inc = Number.isFinite(monthlyInclVat) ? monthlyInclVat
-          : Math.round(ex * (1 + (Number(vatRate)||0)) * 100) / 100;
-
+// ---- Fees & Billing (ultra-compact; no space between line items)
 drawCard('Fees & Billing', ({ x, w }) => {
-  const one = (t) => {
-    const est = doc.heightOfString(String(t||''), { width: w - 10, lineGap: 0.2 });
-    if (!hasSpace(est + 4)) return;
-    doc.circle(x + 2.5, y + 2.8, 0.9).fill('#6B7280');
-    doc.fillColor(MUTED).font('Helvetica').fontSize(7.7)
-       .text(t, x + 8, y, { width: w - 10, lineGap: 0.2 });
-    moveY(est + 2);
+  const bullet = (t) => {
+    const lh = 9.2; // fixed line height for perfect stacking
+    const wrapW = w - 12;
+    // bullet dot
+    doc.circle(x + 3, y + 3.6, 0.85).fill('#6B7280');
+    // text with NO extra line gap
+    doc.fillColor(MUTED).font('Helvetica').fontSize(7.6)
+       .text(String(t||''), x + 8, y - 1, { width: wrapW, lineGap: 0 });
+    // advance by measured height but with zero extra padding
+    const h = doc.heightOfString(String(t||''), { width: wrapW, lineGap: 0 });
+    y += Math.max(lh, h); // no +2/+4 padding
     doc.fillColor(INK);
   };
-  one(`Monthly: ${money(ex)} ex VAT  •  ${money(inc)} incl VAT  •  VAT ${((Number(vatRate)||0)*100).toFixed(0)}%.`);
-  one(`Scope: ${serviceDescription}. Once-off (install/hardware/porting) per signed quote.`);
-  one('First invoice payable upfront before activation. Thereafter billed monthly in arrears (end of month).');
-  one('Payment via debit order or EFT by due date; late payment may suspend service and accrues interest at prime + 6%.');
-  one(`Term: Month-to-month; ${noticeDays}-day written notice to cancel.`);
-}, { minHeight: 72 });
+  bullet(`Monthly: ${money(ex)} ex VAT  •  ${money(inc)} incl VAT  •  VAT ${((Number(vatRate)||0)*100).toFixed(0)}%.`);
+  bullet(`Scope: ${serviceDescription}. Once-off (install/hardware/porting) per signed quote.`);
+  bullet('First invoice payable upfront before activation. Thereafter billed monthly in arrears (end of month).');
+  bullet('Payment via debit order or EFT by due date; late payment may suspend service and accrues interest at prime + 6%.');
+  bullet(`Term: Month-to-month; ${noticeDays}-day written notice to cancel.`);
+}, { minHeight: 54 }); // was 72
 
 // ---- Debit Order Mandate (spacious, signature inside; initials AFTER card)
 drawCard('Debit Order Mandate (Fill In)', (box) => {
@@ -391,12 +308,12 @@ drawCard('Debit Order Mandate (Fill In)', (box) => {
   }
 }, { minHeight: 140 });
 
-// ---- Client Initials (AFTER the debit order card, at bottom of page 1)
-const initialsY = pageBottom() - FOOTER_H - 10;
+// ---- Client Initials — keep tight at bottom
+const initialsY = pageBottom() - FOOTER_H - 8; // was -10
 doc.font('Helvetica').fontSize(8).fillColor(MUTED)
    .text('Client Initials:', L, initialsY, { width: 90 });
-doc.moveTo(L + 70, initialsY + 10).lineTo(L + 170, initialsY + 10).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-
+doc.moveTo(L + 70, initialsY + 8).lineTo(L + 170, initialsY + 8)
+   .strokeColor('#9CA3AF').lineWidth(0.8).stroke();
 // ---- Footer Page 1
 const footer1Y = doc.page.height - 24;
 doc.font('Helvetica').fontSize(7).fillColor(MUTED)
