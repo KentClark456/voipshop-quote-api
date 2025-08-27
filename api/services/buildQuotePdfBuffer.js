@@ -15,7 +15,7 @@ const money = (n) =>
 async function loadLogoBuffer(overrideUrl = '') {
   const localCandidates = [
     path.resolve(__dirname, '../Assets/Group 1642logo (1).png'),
-    path.resolve(__dirname, '../../Assets/Group 1642logo (1).png')
+    path.resolve(__dirname, '../../Assets/Group 1642logo (1).png'),
   ];
   for (const p of localCandidates) {
     try {
@@ -34,7 +34,10 @@ async function loadLogoBuffer(overrideUrl = '') {
 }
 
 /**
- * Build QUOTE PDF buffer (clean layout, summary cards, tables, pay-now band)
+ * Build QUOTE PDF buffer — 2-page Apple-ish layout.
+ * Page 1: Logo, title, cards (Quote Info, Bill To, Totals), Included/Notes.
+ * Page 2: Once-off & Monthly tables, Pay-now band, footer.
+ *
  * @param {{
  *   quoteNumber:string, dateISO:string, validDays:number,
  *   client:{name?:string, company?:string, email?:string, phone?:string, address?:string},
@@ -42,17 +45,31 @@ async function loadLogoBuffer(overrideUrl = '') {
  *   itemsMonthly:Array<{name:string, qty:number, unit:number, minutes?:number}>,
  *   subtotals:{ onceOff:number, monthly:number },
  *   notes?:string, stamp?:string, compact?:boolean,
- *   company:{ name:string, address?:string, phone?:string, email?:string, vatRate:number,
- *             logoUrl?:string, colors:{brand:string, ink:string, gray6:string, gray4:string, line:string, thbg:string, pill:string} }
+ *   company:{
+ *     name:string, address?:string, phone?:string, email?:string, vatRate:number,
+ *     logoUrl?:string,
+ *     colors?:{brand?:string, ink?:string, gray6?:string, gray4?:string, line?:string, thbg?:string, pill?:string}
+ *   }
  * }} q
  * @returns {Promise<Buffer>}
  */
 export async function buildQuotePdfBuffer(q) {
   const compact = !!q.compact;
 
-  // Page + margins
-  const margin = compact ? 40 : 46;
-  const doc = new PDFDocument({ size: 'A4', margin });
+  // Theme defaults (gentle, neutral; tweak here if you want)
+  const theme = {
+    brand: q.company?.colors?.brand || '#0B63E6',
+    ink:   q.company?.colors?.ink   || '#111111',
+    gray6: q.company?.colors?.gray6 || '#4b5563',
+    gray4: q.company?.colors?.gray4 || '#6b7280',
+    line:  q.company?.colors?.line  || '#e5e7eb',
+    thbg:  q.company?.colors?.thbg  || '#f7f8fa',
+    pill:  q.company?.colors?.pill  || '#f5f5f7',
+  };
+
+  // Page & margins (wider margins to feel airy)
+  const margin = compact ? 44 : 56;
+  const doc = new PDFDocument({ size: 'A4', margin, bufferPages: true });
   const chunks = [];
   doc.on('data', (c) => chunks.push(c));
   const done = new Promise((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
@@ -62,95 +79,58 @@ export async function buildQuotePdfBuffer(q) {
   const R = doc.page.width - doc.page.margins.right;
   const W = R - L;
 
-  // Brand palette
-  const { brand, ink, gray6, gray4, line, thbg, pill } = q.company.colors;
-
-  // Optional watermark/stamp (e.g. DRAFT/PAID)
-  const paintStamp = (text) => {
-    if (!text) return;
-    doc.save();
-    doc.rotate(-30, { origin: [doc.page.width / 2, doc.page.height / 2] });
-    doc.font('Helvetica-Bold').fontSize(90).fillColor('#EEF2FF').opacity(0.7)
-       .text(text, doc.page.width * 0.1, doc.page.height * 0.25, {
-         width: doc.page.width * 0.8,
-         align: 'center'
-       });
-    doc.opacity(1).restore();
-  };
-
-  // Top brand hairline
-  doc.save().rect(0, 0, doc.page.width, 6).fill(brand).restore();
-
-  // Header
-  const headerTop = 22;
-  const logoBuf = await loadLogoBuffer(q.company.logoUrl);
-  if (logoBuf) {
-    try { doc.image(logoBuf, L, headerTop, { width: compact ? 130 : 150 }); } catch {}
-  } else {
-    doc.font('Helvetica-Bold').fontSize(16).fillColor(ink).text(q.company.name, L, headerTop);
-  }
+  const { brand, ink, gray6, gray4, line, thbg, pill } = theme;
 
   const datePretty = (() => {
     try { return new Date(q.dateISO).toISOString().slice(0, 10); } catch { return String(q.dateISO || '').slice(0, 10); }
   })();
 
-  doc
-    .font('Helvetica-Bold').fontSize(compact ? 20 : 22).fillColor(ink)
-    .text('Quote', L, headerTop, { width: W, align: 'right' })
-    .moveDown(0.2);
-
-  doc.font('Helvetica').fontSize(10).fillColor(gray6)
-    .text(`Quote #: ${q.quoteNumber}`, L, undefined, { width: W, align: 'right' })
-    .text(`Date: ${datePretty}`,       L, undefined, { width: W, align: 'right' })
-    .text(`Valid: ${Number(q.validDays || 7)} days`, L, undefined, { width: W, align: 'right' });
-
-  // Company block
-  doc.moveDown(compact ? 1.5 : 2);
-  doc.font('Helvetica-Bold').fontSize(12).fillColor(ink).text(q.company.name, L, undefined, { width: W });
-  doc.font('Helvetica').fontSize(10).fillColor(gray6)
-    .text(q.company.address || '', L, undefined, { width: W })
-    .text(`${q.company.phone || ''}${q.company.email ? ' • ' + q.company.email : ''}`, L, undefined, { width: W });
-
-  // Client block
-  doc.moveDown(compact ? 1.0 : 1.2);
-  doc.font('Helvetica-Bold').fontSize(11).fillColor(ink).text('Bill To', L, undefined, { width: W });
-  doc.font('Helvetica').fontSize(10).fillColor(ink)
-    .text(q.client?.name || '', L, undefined, { width: W })
-    .text(q.client?.company || '', L, undefined, { width: W })
-    .text(q.client?.email || '', L, undefined, { width: W })
-    .text(q.client?.phone || '', L, undefined, { width: W })
-    .text(q.client?.address || '', L, undefined, { width: W });
-
-  // Totals (compute once)
-  const vatRate = Number(q.company.vatRate ?? 0.15);
-  const onceSub = Number(q.subtotals.onceOff || 0);
-  const monSub  = Number(q.subtotals.monthly || 0);
+  const vatRate = Number(q.company?.vatRate ?? 0.15);
+  const onceSub = Number(q.subtotals?.onceOff || 0);
+  const monSub  = Number(q.subtotals?.monthly || 0);
   const onceVat = onceSub * vatRate;
   const monVat  = monSub * vatRate;
   const onceTotal = onceSub + onceVat;
   const monTotal  = monSub + monVat;
   const grandPayNow = onceTotal + monTotal;
 
-  // Summary cards
-  const yStart = doc.y + (compact ? 10 : 14);
-  const gap = 12;
-  const cardH = compact ? 44 : 48;
-  const cardW = (W - gap) / 2;
-
-  const card = (x, y, w, h, title, value, subtitle) => {
-    doc.save().roundedRect(x, y, w, h, 12).fill(pill).restore();
-    doc.roundedRect(x, y, w, h, 12).strokeColor(line).stroke();
-    doc.font('Helvetica').fontSize(9).fillColor(gray6).text(title, x + 12, y + 8);
-    doc.font('Helvetica-Bold').fontSize(compact ? 13 : 14).fillColor(ink).text(value, x + 12, y + 22);
-    if (subtitle) {
-      doc.font('Helvetica').fontSize(9).fillColor(gray6)
-        .text(subtitle, x + w - 70, y + 22, { width: 60, align: 'right' });
-    }
+  // ---------- Small helpers ----------
+  const spacer = (h) => { doc.y += h; };
+  const rule = (y, thick = 1) => {
+    doc.save().moveTo(L, y).lineTo(R, y).lineWidth(thick).strokeColor(line).stroke().restore();
   };
-  card(L, yStart, cardW, cardH, 'MONTHLY', money(monTotal), '/month');
-  card(L + cardW + gap, yStart, cardW, cardH, 'ONCE-OFF', money(onceTotal), 'setup');
+  const sectionTitle = (title, y = doc.y) => {
+    doc.font('Helvetica-Bold').fontSize(compact ? 12 : 13).fillColor(ink)
+       .text(title, L, y, { width: W });
+    spacer(compact ? 6 : 8);
+  };
+  const caption = (text, x, y, width = 200, align = 'left') => {
+    doc.font('Helvetica').fontSize(9).fillColor(gray6)
+       .text(text, x, y, { width, align });
+  };
+  const label = (text, x, y, width = 200, align = 'left') => {
+    doc.font('Helvetica').fontSize(10).fillColor(gray6)
+       .text(text, x, y, { width, align });
+  };
+  const value = (text, x, y, width = 200, align = 'left', bold = false) => {
+    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(11).fillColor(ink)
+       .text(text, x, y, { width, align });
+  };
 
-  doc.y = yStart + cardH + (compact ? 12 : 16);
+  const card = ({ x, y, w, h, radius = 14, fill = pill, stroke = line }) => {
+    doc.save().roundedRect(x, y, w, h, radius).fill(fill).restore();
+    doc.save().roundedRect(x, y, w, h, radius).lineWidth(1).strokeColor(stroke).stroke().restore();
+  };
+
+  const chip = (txt, x, y) => {
+    const padX = 8, padY = 4;
+    const width = doc.widthOfString(txt) + padX * 2;
+    const height = 16 + padY;
+    doc.save().roundedRect(x, y, width, height, 10).fill('#E7F0FF').restore();
+    doc.save().roundedRect(x, y, width, height, 10).strokeColor('#D7E6FF').stroke().restore();
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('#0B63E6').text(txt, x + padX, y + 5);
+    return { w: width, h: height };
+  };
 
   const unitText = (it, monthly) => {
     const looksLikeCalls = /call|minute/i.test(it.name);
@@ -162,127 +142,222 @@ export async function buildQuotePdfBuffer(q) {
     return money(it.unit);
   };
 
-  // Generic table renderer
-  const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
-    const colW = [ W * 0.58, W * 0.12, W * 0.12, W * 0.18 ];
+  const addFooter = () => {
+    const y = doc.page.height - 32;
+    doc.font('Helvetica').fontSize(9).fillColor(gray4)
+      .text(`${q.company.name} • ${q.company.email || ''} • ${q.company.phone || ''}`, L, y, { width: W, align: 'left' })
+      .text(`Page ${doc.page.number}`, L, y, { width: W, align: 'right' });
+  };
+
+  const paintStamp = (text) => {
+    if (!text) return;
+    doc.save();
+    doc.rotate(-30, { origin: [doc.page.width / 2, doc.page.height / 2] });
+    doc.font('Helvetica-Bold').fontSize(90).fillColor('#EEF2FF').opacity(0.7)
+       .text(text, doc.page.width * 0.1, doc.page.height * 0.25, { width: doc.page.width * 0.8, align: 'center' });
+    doc.opacity(1).restore();
+  };
+
+  // ---------- HEADER (Page 1) ----------
+  // Thin brand bar
+  doc.save().rect(0, 0, doc.page.width, 6).fill(brand).restore();
+
+  const headerTop = 26;
+  const logoBuf = await loadLogoBuffer(q.company?.logoUrl);
+  if (logoBuf) {
+    try { doc.image(logoBuf, L, headerTop, { width: compact ? 128 : 148 }); } catch {}
+  } else {
+    doc.font('Helvetica-Bold').fontSize(16).fillColor(ink).text(q.company?.name || 'Company', L, headerTop);
+  }
+
+  // Right side: Quote title + meta
+  const titleX = L + (compact ? 260 : 280);
+  const titleW = R - titleX;
+  doc.font('Helvetica-Bold').fontSize(compact ? 22 : 24).fillColor(ink)
+     .text('Quote', titleX, headerTop, { width: titleW, align: 'right' });
+  spacer(compact ? 0 : 2);
+  doc.font('Helvetica').fontSize(10).fillColor(gray6)
+     .text(`Quote #: ${q.quoteNumber}`, titleX, doc.y, { width: titleW, align: 'right' })
+     .text(`Date: ${datePretty}`,      titleX, doc.y,   { width: titleW, align: 'right' })
+     .text(`Valid: ${Number(q.validDays || 7)} days`, titleX, doc.y, { width: titleW, align: 'right' });
+
+  spacer(compact ? 14 : 18);
+
+  // ---------- PAGE 1 CARDS GRID ----------
+  // Grid: 3 cards side-by-side (stack if narrow margins)
+  const gap = 12;
+  const col = (W - gap * 2) / 3;
+  let y = Math.max(doc.y + (compact ? 10 : 14), headerTop + (compact ? 72 : 78));
+
+  // Card A: Quote Info
+  const aH = compact ? 108 : 120;
+  card({ x: L, y, w: col, h: aH });
+  caption('Quote Info', L + 14, y + 10);
+  let ty = y + 30;
+  label('Company', L + 14, ty);   value(q.company?.name || '', L + 14, ty + 13, col - 28); ty += 32;
+  label('Email',   L + 14, ty);   value(q.company?.email || '', L + 14, ty + 13, col - 28); ty += 32;
+  label('Phone',   L + 14, ty);   value(q.company?.phone || '', L + 14, ty + 13, col - 28);
+
+  // Card B: Bill To
+  card({ x: L + col + gap, y, w: col, h: aH });
+  caption('Bill To', L + col + gap + 14, y + 10);
+  ty = y + 30;
+  value(q.client?.name || '',     L + col + gap + 14, ty, col - 28, 'left', true); ty += 20;
+  value(q.client?.company || '',  L + col + gap + 14, ty, col - 28); ty += 16;
+  label('Email',  L + col + gap + 14, ty); value(q.client?.email || '',  L + col + gap + 14, ty + 13, col - 28); ty += 32;
+  label('Phone',  L + col + gap + 14, ty); value(q.client?.phone || '',  L + col + gap + 14, ty + 13, col - 28);
+
+  // Card C: Totals
+  const cH = compact ? 108 : 120;
+  card({ x: L + (col + gap) * 2, y, w: col, h: cH });
+  const cx = L + (col + gap) * 2 + 14;
+  caption('Totals (incl. VAT)', cx, y + 10);
+  ty = y + 32;
+  label('Monthly', cx, ty);     value(money(monTotal), cx, ty + 13, col - 28, 'left', true); ty += 34;
+  label('Once-off', cx, ty);    value(money(onceTotal), cx, ty + 13, col - 28, 'left', true); ty += 34;
+
+  // Badges
+  chip('VAT included', cx, y + cH - 24);
+
+  y += Math.max(aH, cH);
+  spacer(compact ? 14 : 18);
+
+  // Card D: Included / Notes (full-width)
+  const dH = compact ? 110 : 120;
+  card({ x: L, y, w: W, h: dH });
+  caption('What’s Included', L + 14, y + 10);
+  const blurb = [
+    '• Professional install & device setup',
+    '• Remote support',
+    '• PBX configuration',
+    '• Number porting assistance',
+    '• Standard call-out fee: R450',
+  ].join('\n');
+
+  doc.font('Helvetica').fontSize(10).fillColor(ink)
+     .text(blurb, L + 14, y + 30, { width: W - 28 });
+
+  if (q.notes) {
+    const nx = L + (W * 0.52);
+    const nw = W - (nx - L) - 14;
+    caption('Notes', nx, y + 10);
+    doc.font('Helvetica').fontSize(10).fillColor(ink)
+       .text(q.notes, nx, y + 30, { width: nw });
+  }
+
+  // Footer & stamp for Page 1
+  paintStamp(q.stamp);
+  addFooter();
+
+  // ---------- Force Page Break (start Page 2) ----------
+  doc.addPage();
+  paintStamp(q.stamp);
+
+  // Repeat thin brand bar for continuity
+  doc.save().rect(0, 0, doc.page.width, 6).fill(brand).restore();
+
+  spacer(compact ? 16 : 20);
+  sectionTitle('Details');
+
+  // ---------- TABLES (Page 2) ----------
+  const renderTable = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
+    const colW = [ W * 0.60, W * 0.12, W * 0.12, W * 0.16 ];
     const rowH = compact ? 20 : 24;
     const headH = compact ? 18 : 20;
-    let y = doc.y;
 
-    // Section title
-    doc.font('Helvetica-Bold').fontSize(12).fillColor(ink).text(title, L, y, { width: W });
-    y = doc.y + (compact ? 4 : 6);
+    // Section card
+    const cardTop = doc.y;
+    let innerY = cardTop + (compact ? 8 : 10);
+    const paddingX = 14;
+    const minBodyH = (items?.length || 0) * rowH + headH + (compact ? 62 : 70);
+    const estCardH = Math.max(minBodyH, compact ? 120 : 132);
+
+    // Draw card block
+    card({ x: L, y: cardTop, w: W, h: estCardH });
+    // Title
+    doc.font('Helvetica-Bold').fontSize(12).fillColor(ink).text(title, L + paddingX, innerY);
+    innerY += compact ? 6 : 8;
 
     // Header row
-    doc.save().rect(L, y, W, headH).fill(thbg).restore();
+    doc.save().rect(L, innerY, W, headH).fill(thbg).restore();
     doc.font('Helvetica-Bold').fontSize(10).fillColor(ink);
-    const headY = y + (compact ? 3 : 5);
-    doc.text('Description', L + 8, headY, { width: colW[0] - 10 });
-    doc.text('Qty',         L + colW[0], headY, { width: colW[1], align: 'right' });
+    const headY = innerY + (compact ? 3 : 5);
+    doc.text('Description', L + paddingX, headY, { width: colW[0] - (paddingX + 2) });
+    doc.text('Qty',         L + colW[0],   headY, { width: colW[1], align: 'right' });
     doc.text('Unit',        L + colW[0] + colW[1], headY, { width: colW[2], align: 'right' });
-    doc.text('Amount',      L + colW[0] + colW[1] + colW[2], headY, { width: colW[3], align: 'right' });
+    doc.text('Amount',      L + colW[0] + colW[1] + colW[2], headY, { width: colW[3] - paddingX, align: 'right' });
 
-    doc.moveTo(L, y + headH).lineTo(R, y + headH).strokeColor(line).stroke();
-    y += headH + 2;
+    doc.moveTo(L, innerY + headH).lineTo(R, innerY + headH).strokeColor(line).stroke();
+    innerY += headH + 2;
 
     // Body
     doc.font('Helvetica').fontSize(10).fillColor(ink);
     const zebra = ['#ffffff', '#fbfdff'];
     let rowIndex = 0;
 
-    const ensureSpace = (need = 140) => {
-      if (y > doc.page.height - need) {
-        doc.addPage();
-        paintStamp(q.stamp);
-        y = doc.y;
-      }
-    };
-
-    if (!items.length) {
-      ensureSpace(120);
-      doc.text('No items.', L + 8, y, { width: W - 16 });
-      y = doc.y + 6;
+    if (!items?.length) {
+      doc.text('No items.', L + paddingX, innerY, { width: W - paddingX * 2 });
+      innerY += rowH;
     } else {
       for (const it of items) {
-        ensureSpace(160);
-        const qty    = Number(it.qty || 1);
-        const amount = it.unit * qty;
-
-        // Zebra background
-        doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
+        // row background
+        doc.save().rect(L, innerY, W, rowH).fill(zebra[rowIndex % 2]).restore();
         rowIndex++;
+        const yTxt = innerY + (compact ? 4 : 6);
+        const qty    = Number(it.qty || 1);
+        const amount = (Number(it.unit) || 0) * qty;
 
-        const rowTextY = y + (compact ? 4 : 6);
-        doc.text(String(it.name || ''), L + 8, rowTextY, { width: colW[0] - 10 });
-        doc.text(String(qty),           L + colW[0], rowTextY, { width: colW[1], align: 'right' });
-        doc.text(unitText(it, monthly), L + colW[0] + colW[1], rowTextY, { width: colW[2], align: 'right' });
-        doc.text(money(amount),         L + colW[0] + colW[1] + colW[2], rowTextY, { width: colW[3], align: 'right' });
+        doc.text(String(it.name || ''), L + paddingX, yTxt, { width: colW[0] - (paddingX + 2) });
+        doc.text(String(qty),           L + colW[0], yTxt,   { width: colW[1], align: 'right' });
+        doc.text(unitText(it, monthly), L + colW[0] + colW[1], yTxt, { width: colW[2], align: 'right' });
+        doc.text(money(amount),         L + colW[0] + colW[1] + colW[2], yTxt, { width: colW[3] - paddingX, align: 'right' });
 
-        y += rowH;
+        innerY += rowH;
       }
     }
 
-    // Totals
-    doc.moveTo(L, y).lineTo(R, y).strokeColor(line).stroke();
-    y += compact ? 8 : 10;
+    // Totals inside the card
+    doc.moveTo(L, innerY).lineTo(R, innerY).strokeColor(line).stroke();
+    innerY += compact ? 8 : 10;
 
     const labelW = compact ? 130 : 140;
     const valW   = compact ? 110 : 120;
-    const valX   = R - valW;
+    const valX   = R - paddingX - valW;
     const labelX = valX - labelW - 8;
 
-    const totalLine = (label, val, bold = false) => {
+    const totalLine = (lbl, val, bold = false) => {
       doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10).fillColor(bold ? ink : gray6)
-        .text(label, labelX, y, { width: labelW, align: 'right' });
+        .text(lbl, labelX, innerY, { width: labelW, align: 'right' });
       doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(ink)
-        .text(money(val), valX, y, { width: valW, align: 'right' });
-      y += compact ? 14 : 16;
+        .text(money(val), valX, innerY, { width: valW, align: 'right' });
+      innerY += compact ? 14 : 16;
     };
 
     totalLine('Subtotal', subtotalEx);
     totalLine(`VAT (${Math.round(vatRate * 100)}%)`, vatAmt);
     totalLine(monthly ? 'Total / month' : 'Total (once-off)', totalInc, true);
 
-    doc.y = y + (compact ? 4 : 6);
+    // Adjust doc.y to end of card
+    const cardBottom = Math.max(innerY + (compact ? 8 : 10), cardTop + estCardH);
+    doc.y = cardBottom + (compact ? 12 : 16);
   };
 
-  // Paint optional page stamp first page
-  paintStamp(q.stamp);
+  renderTable('Once-off Charges', q.itemsOnceOff || [], onceSub, onceVat, onceTotal, false);
+  renderTable('Monthly Charges',  q.itemsMonthly || [], monSub,  monVat,  monTotal,  true);
 
-  // Sections
-  table('Once-off Charges', q.itemsOnceOff, onceSub, onceVat, onceTotal, false);
-  doc.moveDown(compact ? 0.6 : 0.8);
-  table('Monthly Charges', q.itemsMonthly, monSub, monVat, monTotal, true);
-  doc.moveDown(compact ? 1.0 : 1.2);
-
-  // Pay-now band
-  const yBand = doc.y + 4;
-  const bandH = compact ? 30 : 34;
-  doc.save().roundedRect(L, yBand, W, bandH, 10).fill(pill).restore();
-  doc.roundedRect(L, yBand, W, bandH, 10).strokeColor(line).stroke();
+  // ---------- Pay-now band (subtle pill) ----------
+  const bandH = compact ? 34 : 38;
+  const bandY = doc.y;
+  card({ x: L, y: bandY, w: W, h: bandH, radius: 12 });
   doc.font('Helvetica-Bold').fontSize(12).fillColor(ink)
-    .text('Pay now (incl VAT)', L + 12, yBand + (compact ? 7 : 9));
-  doc.text(money(grandPayNow), L, yBand + (compact ? 7 : 9), { width: W - 12, align: 'right' });
+     .text('Pay now (incl VAT)', L + 14, bandY + (compact ? 7 : 9));
+  doc.font('Helvetica-Bold').fontSize(12).fillColor(ink)
+     .text(money(grandPayNow), L, bandY + (compact ? 7 : 9), { width: W - 14, align: 'right' });
 
-  doc.moveDown(compact ? 1.6 : 2.0);
-
-  // Notes / Included (wrapped)
-  const blurb = [
-    'Included: Professional install & device setup; Remote support; PBX configuration; Number porting assistance. Standard call-out fee: R450.',
-    q.notes ? `Notes: ${q.notes}` : '',
-    `This quote is valid for ${Number(q.validDays || 7)} days. Pricing in ZAR.`
-  ].filter(Boolean).join('\n');
-
-  doc.font('Helvetica').fontSize(9).fillColor(gray6).text(blurb, L, undefined, { width: W });
-
-  // Footer with page numbers + contact
-  const addFooter = () => {
-    const y = doc.page.height - 30;
-    doc.font('Helvetica').fontSize(9).fillColor(gray4)
-      .text(`${q.company.name} • ${q.company.email} • ${q.company.phone}`, L, y, { width: W, align: 'left' })
-      .text(`Page ${doc.page.number}`, L, y, { width: W, align: 'right' });
-  };
+  // Footer
   addFooter();
+
+  // Page-added hook to keep footer/stamp consistent
   doc.on('pageAdded', () => {
     paintStamp(q.stamp);
     addFooter();
