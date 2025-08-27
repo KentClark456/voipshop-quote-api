@@ -90,6 +90,50 @@ export async function buildSlaPdfBuffer(params = {}) {
     doc.fillColor(INK);
   };
 
+  // Small helpers for “card” sections
+  const drawCard = (title, contentHeightCb) => {
+    const cardTop = y;
+    // Reserve a bit for title pill; draw after content to know height
+    // Render content
+    const innerLeft = L + 12;
+    const maxW = W - 24;
+
+    const startY = y + 18; // leave room for pill
+    doc.y = startY; y = startY;
+
+    contentHeightCb({ x: innerLeft, w: maxW });
+
+    const cardBottom = y + 10;
+    const hCard = Math.max(64, cardBottom - cardTop);
+
+    // Card outline
+    doc.save();
+    doc.roundedRect(L, cardTop, W, hCard, 10).strokeColor(BORDER).lineWidth(1).stroke();
+    // Title pill (white with subtle stroke – avoids the green overlap)
+    const pillW = Math.min(200, doc.widthOfString(title, { font: 'Helvetica-Bold', size: 9 }) + 24);
+    doc.roundedRect(L + 12, cardTop - 10, pillW, 20, 10).fillColor('white').fill();
+    doc.roundedRect(L + 12, cardTop - 10, pillW, 20, 10).strokeColor(BORDER).lineWidth(1).stroke();
+    doc.fillColor(INK).font('Helvetica-Bold').fontSize(9).text(title, L + 12 + 10, cardTop - 6, { width: pillW - 20, align: 'left' });
+    doc.restore();
+
+    // Place cursor after card
+    doc.y = cardTop + hCard; y = doc.y + 6;
+  };
+
+  const lineFill = ({ x, w }, label, preset = '', lineW = w * 0.6) => {
+    if (!hasSpace(20)) return;
+    const labelW = Math.min(160, Math.max(110, w * 0.30));
+    const lx = x;
+    doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, lx, y + 2, { width: labelW - 8 });
+    const sx = lx + labelW;
+    const ly = y + 12;
+    doc.moveTo(sx, ly).lineTo(sx + lineW, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+    if (preset) {
+      doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), sx + 2, y + 4, { width: lineW - 6, ellipsis: true });
+    }
+    moveY(18);
+  };
+
   // ---- Header (Page 1) ----
   y = await drawLogoHeader(doc, {
     logoUrl: company?.logoUrl,
@@ -111,9 +155,8 @@ export async function buildSlaPdfBuffer(params = {}) {
     moveY(26);
   }
 
-  // ---- Parties (Provider without reg number)
+  // ---- Parties (summary list)
   h('Parties');
-  // Provider line: omit reg number, allow VAT if given
   kv('Provider', `${company?.name || 'VoIP Shop'}${company?.vat ? ` | VAT ${company.vat}` : ''}`);
   kv('Contact', `${company?.phone || ''}${company?.email ? ` | ${company.email}`:''}${company?.website ? ` | ${company.website}`:''}`);
   kv('Address', company?.address || '');
@@ -122,6 +165,33 @@ export async function buildSlaPdfBuffer(params = {}) {
   kv('Contact', `${customer?.contact || ''}${customer?.phone ? ` | ${customer.phone}`:''}${customer?.email ? ` | ${customer.email}`:''}`);
   kv('Address', customer?.address || '');
   rule(8);
+
+  // ---- NEW: Parties — Details (Fill In) card section
+  if (hasSpace(210)) {
+    drawCard('Parties — Details (Fill In)', (box) => {
+      // Provider card
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text('Provider Details (VoIP Shop)', box.x, doc.y, { width: box.w });
+      moveY(6);
+      lineFill(box, 'Provider Name', company?.name || 'VoIP Shop');
+      lineFill(box, 'VAT Number', company?.vat || '');
+      lineFill(box, 'Phone', company?.phone || '');
+      lineFill(box, 'Email', company?.email || '');
+      lineFill(box, 'Website', company?.website || '');
+      lineFill(box, 'Address', company?.address || '', box.w * 0.72);
+
+      moveY(6);
+      // Customer card
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text('Customer Details (Confirm / Fill In)', box.x, doc.y, { width: box.w });
+      moveY(6);
+      lineFill(box, 'Customer / Company', customer?.name || customer?.company || '');
+      lineFill(box, 'Reg Number', customer?.reg || '');
+      lineFill(box, 'VAT Number', customer?.vat || '');
+      lineFill(box, 'Contact Person', customer?.contact || '');
+      lineFill(box, 'Phone', customer?.phone || '');
+      lineFill(box, 'Email', customer?.email || '');
+      lineFill(box, 'Service Address', customer?.address || '', box.w * 0.72);
+    });
+  }
 
   // ---- Services Ordered — derive if not provided
   const deriveServices = () => {
@@ -140,99 +210,119 @@ export async function buildSlaPdfBuffer(params = {}) {
       return {
         name,
         qty: looksLikeCalls ? (mins || 0) : Number(it?.qty || 1),
-        unit: looksLikeCalls ? 'minutes' : (it?.unit ? 'ea' : ''),
+        unit: looksLikeCalls ? 'minutes' : (it?.unit || 'ea'),
         note: looksLikeCalls && mins ? `Includes ${mins} minutes` : ''
       };
     });
   };
   const svc = deriveServices();
 
-  h('Services Ordered (Monthly)');
-  if (!svc.length) {
-    p('No monthly service lines were supplied. (Pass `services` OR `itemsMonthly` + `minutesIncluded`.)');
-  } else {
-    const maxRows = 6; // cap to keep page 1 tidy
-    if (hasSpace(12)) {
+  // Services Ordered card
+  if (hasSpace(140)) {
+    drawCard('Services Ordered (Monthly)', ({ x, w }) => {
+      if (!svc.length) {
+        doc.font('Helvetica').fontSize(8).fillColor(MUTED)
+          .text('No monthly service lines were supplied. (Pass `services` OR `itemsMonthly` + `minutesIncluded`.)', x, y, { width: w });
+        moveY(12);
+        return;
+      }
+      const maxRows = 6;
+      // Header row
       doc.font('Helvetica-Bold').fontSize(8).fillColor(INK)
-        .text('Item', L, y, { width: 230 })
-        .text('Qty', L + 240, y, { width: 40, align: 'right' })
-        .text('Notes', L + 290, y, { width: R - (L + 290) });
+        .text('Item', x, y, { width: w * 0.60 })
+        .text('Qty',  x + w * 0.62, y, { width: w * 0.12, align: 'right' })
+        .text('Notes',x + w * 0.76, y, { width: w * 0.24 });
       moveY(10);
-      if (hasSpace(6)) { doc.moveTo(L, y).lineTo(R, y).strokeColor('#D1D5DB').stroke(); moveY(5); }
-    }
-    for (let i = 0; i < Math.min(svc.length, maxRows); i++) {
-      const { name, qty, unit, note } = svc[i];
-      const need = 12;
-      if (!hasSpace(need)) break;
-      doc.font('Helvetica').fontSize(8).fillColor(MUTED)
-        .text(name || '', L, y, { width: 230 })
-        .text(qty != null ? `${qty}${unit ? ' ' + unit : ''}` : '—', L + 240, y, { width: 40, align: 'right' })
-        .text(note || '', L + 290, y, { width: R - (L + 290) });
-      moveY(12);
-    }
-    const remaining = Math.max(0, svc.length - maxRows);
-    if (remaining > 0 && hasSpace(10)) {
-      doc.font('Helvetica-Oblique').fontSize(8).fillColor(MUTED).text(`+${remaining} more item(s)`, L, y);
-      moveY(10);
+      doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#D1D5DB').stroke(); moveY(6);
+
+      for (let i = 0; i < Math.min(svc.length, maxRows); i++) {
+        const { name, qty, unit, note } = svc[i];
+        const qtyTxt = (qty != null) ? `${qty}${unit ? ' ' + unit : ''}` : '—';
+        doc.font('Helvetica').fontSize(8).fillColor(MUTED)
+          .text(name || '', x, y, { width: w * 0.60 })
+          .text(qtyTxt, x + w * 0.62, y, { width: w * 0.12, align: 'right' })
+          .text(note || '', x + w * 0.76, y, { width: w * 0.24 });
+        moveY(12);
+      }
+      const remaining = Math.max(0, svc.length - maxRows);
+      if (remaining > 0) {
+        doc.font('Helvetica-Oblique').fontSize(8).fillColor(MUTED).text(`+${remaining} more item(s)`, x, y);
+        moveY(10);
+      }
+    });
+  } else {
+    // fallback to flat (very short pages)
+    h('Services Ordered (Monthly)');
+    if (!svc.length) {
+      p('No monthly service lines were supplied. (Pass `services` OR `itemsMonthly` + `minutesIncluded`.)');
     }
   }
-  rule(8);
 
-  // ---- Fees & Billing (policy: first invoice upfront, thereafter in arrears)
+  // ---- Fees & Billing (card)
   const ex  = Number.isFinite(monthlyExVat) ? monthlyExVat : 0;
   const inc = Number.isFinite(monthlyInclVat) ? monthlyInclVat
             : Math.round(ex * (1 + (Number(vatRate)||0)) * 100) / 100;
 
-  h('Fees & Billing');
-  bullet(`Monthly: R ${ex.toFixed(2)} ex VAT  •  R ${inc.toFixed(2)} incl VAT  •  VAT ${((Number(vatRate)||0)*100).toFixed(0)}%.`);
-  bullet(`Scope: ${serviceDescription}. Once-off (install/hardware/porting) per signed quote.`);
-  // NEW policy:
-  bullet('Billing: First invoice is payable upfront before activation. Thereafter, services are billed monthly in arrears (end of each month).');
-  bullet('Payment via debit order or EFT by due date; late payment may suspend service and accrues interest at prime + 6%.');
-  bullet(`Term: Month-to-month; ${noticeDays}-day written notice to cancel.`);
-  rule(8);
-
-  // ---- Debit Order Mandate (fill-in)
-  h('Debit Order Mandate (Fill In)');
-  const boxTop = y;
-  const labelW = 140;
-  const line = (label, preset = '', width = W - labelW - 22) => {
-    if (!hasSpace(20)) return;
-    const lx = L + labelW;
-    doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, L, y + 2, { width: labelW - 10 });
-    const ly = y + 12;
-    doc.moveTo(lx, ly).lineTo(lx + width, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-    if (preset) {
-      doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), lx + 2, y + 4, { width: width - 4, ellipsis: true });
-    }
-    moveY(18);
-  };
-  line('Account Holder', debitOrder?.accountName || '');
-  line('Bank', debitOrder?.bank || '');
-  line('Branch Code', debitOrder?.branchCode || '');
-  line('Account Number', debitOrder?.accountNumber || '');
-  line('Account Type (e.g., Cheque/Savings)', debitOrder?.accountType || '');
-  line('Collection Day (1–31)', debitOrder?.dayOfMonth != null ? `Day ${debitOrder.dayOfMonth}` : '', 160);
-  line('Mandate Date (YYYY-MM-DD)', debitOrder?.mandateDateISO || '', 200);
-
-  // signatures inline
-  if (hasSpace(26)) {
-    const sY = y + 6;
-    const colW = (W - 20) / 2;
-    const sx1 = L, sx2 = L + colW + 20;
-    doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('Customer Signature', sx1, sY - 12);
-    doc.moveTo(sx1, sY).lineTo(sx1 + colW, sY).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-    doc.text('Date', sx2, sY - 12);
-    doc.moveTo(sx2, sY).lineTo(sx2 + colW, sY).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-    y = sY + 12; doc.y = y;
+  if (hasSpace(120)) {
+    drawCard('Fees & Billing', ({ x, w }) => {
+      const bulletW = w - 12;
+      const one = (t) => {
+        const est = 12 + doc.heightOfString(String(t||''), { width: bulletW, lineGap: 0.6 });
+        if (!hasSpace(est)) return;
+        doc.circle(x + 2.5, y + 3.2, 1.1).fill('#6B7280');
+        doc.fillColor(MUTED).font('Helvetica').fontSize(8).text(t, x + 8, y, { width: bulletW, lineGap: 0.6 });
+        moveY(doc.heightOfString(String(t||''), { width: bulletW, lineGap: 0.6 }) + 4);
+        doc.fillColor(INK);
+      };
+      one(`Monthly: R ${ex.toFixed(2)} ex VAT  •  R ${inc.toFixed(2)} incl VAT  •  VAT ${((Number(vatRate)||0)*100).toFixed(0)}%.`);
+      one(`Scope: ${serviceDescription}. Once-off (install/hardware/porting) per signed quote.`);
+      one('Billing: First invoice is payable upfront before activation. Thereafter, services are billed monthly in arrears (end of each month).');
+      one('Payment via debit order or EFT by due date; late payment may suspend service and accrues interest at prime + 6%.');
+      one(`Term: Month-to-month; ${noticeDays}-day written notice to cancel.`);
+    });
+  } else {
+    h('Fees & Billing');
+    bullet(`Monthly: R ${ex.toFixed(2)} ex VAT  •  R ${inc.toFixed(2)} incl VAT  •  VAT ${((Number(vatRate)||0)*100).toFixed(0)}%.`);
+    bullet(`Scope: ${serviceDescription}. Once-off (install/hardware/porting) per signed quote.`);
+    bullet('Billing: First invoice is payable upfront before activation. Thereafter, services are billed monthly in arrears (end of each month).');
+    bullet('Payment via debit order or EFT by due date; late payment may suspend service and accrues interest at prime + 6%.');
+    bullet(`Term: Month-to-month; ${noticeDays}-day written notice to cancel.`);
   }
 
-  // outline card + header pill
-  doc.save();
-  doc.roundedRect(L, boxTop - 8, W, Math.max((y - boxTop) + 14, 120), 8).strokeColor(BORDER).lineWidth(1).stroke();
-  doc.roundedRect(L + 10, boxTop - 14, 120, 16, 8).fillColor(TEAL).fill();
-  doc.fillColor('white').font('Helvetica-Bold').fontSize(8.5).text('Debit Order Mandate', L + 18, boxTop - 11);
-  doc.restore();
+  // ---- Debit Order Mandate (card, with fixed title pill)
+  drawCard('Debit Order Mandate (Fill In)', (box) => {
+    const labelW = 140;
+    const fill = (label, preset = '', width = box.w - labelW - 22) => {
+      if (!hasSpace(20)) return;
+      const lx = box.x + labelW;
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, box.x, y + 2, { width: labelW - 10 });
+      const ly = y + 12;
+      doc.moveTo(lx, ly).lineTo(lx + width, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+      if (preset) {
+        doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), lx + 2, y + 4, { width: width - 4, ellipsis: true });
+      }
+      moveY(18);
+    };
+    fill('Account Holder', debitOrder?.accountName || '');
+    fill('Bank', debitOrder?.bank || '');
+    fill('Branch Code', debitOrder?.branchCode || '');
+    fill('Account Number', debitOrder?.accountNumber || '');
+    fill('Account Type (e.g., Cheque/Savings)', debitOrder?.accountType || '');
+    fill('Collection Day (1–31)', debitOrder?.dayOfMonth != null ? `Day ${debitOrder.dayOfMonth}` : '', 160);
+    fill('Mandate Date (YYYY-MM-DD)', debitOrder?.mandateDateISO || '', 200);
+
+    // signatures inline (kept inside the card)
+    if (hasSpace(26)) {
+      const colW = (box.w - 20) / 2;
+      const sx1 = box.x, sx2 = box.x + colW + 20;
+      const sY = y + 6;
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('Customer Signature', sx1, sY - 12);
+      doc.moveTo(sx1, sY).lineTo(sx1 + colW, sY).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+      doc.text('Date', sx2, sY - 12);
+      doc.moveTo(sx2, sY).lineTo(sx2 + colW, sY).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+      y = sY + 12; doc.y = y;
+    }
+  });
 
   // ---- Client Initials (bottom of page 1)
   const initialsY = pageBottom() - FOOTER_H - 10;
@@ -246,7 +336,7 @@ export async function buildSlaPdfBuffer(params = {}) {
      .text(`Agreement No: ${slaNumber} • Page 1 of 2`, L, footer1Y, { width: W, align: 'right' });
 
   // =========================
-  // PAGE 2 — Terms & Conditions (2-column layout to ensure fit)
+  // PAGE 2 — Terms & Conditions (2-column layout)
   // =========================
   doc.addPage();
   y = await drawLogoHeader(doc, {
@@ -268,12 +358,11 @@ export async function buildSlaPdfBuffer(params = {}) {
   const writeSection = (x, title, bullets) => {
     doc.save();
     doc.text('', x, doc.y); // move to column x
-    const startY = doc.y;
     // header
     doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK)
       .text(title, x, doc.y, { width: COL_W });
     doc.moveTo(x, doc.y + 2).lineTo(x + COL_W, doc.y + 2).strokeColor(BORDER).lineWidth(1).stroke();
-    moveToY(doc.y + 8);
+    doc.y = doc.y + 8;
 
     // bullets
     for (const t of bullets) {
@@ -283,18 +372,13 @@ export async function buildSlaPdfBuffer(params = {}) {
       doc.circle(x + 2.5, doc.y + 3.2, 1.1).fill('#6B7280');
       doc.fillColor(MUTED).font('Helvetica').fontSize(7.8)
          .text(t, bx, doc.y, { width: COL_W - 12, lineGap: 0.5 });
-      moveToY(doc.y + 6);
+      doc.y = doc.y + 6;
       doc.fillColor(INK);
     }
     doc.restore();
-
-    function moveToY(val) { doc.y = val; y = val; }
   };
 
-  // set column 1 start
-  doc.y = colTop; y = colTop;
-
-  // Content packs (tight, but comprehensive)
+  // Content packs (expanded)
   const sec1 = {
     title: 'Support & Service Levels',
     bullets: [
@@ -326,31 +410,41 @@ export async function buildSlaPdfBuffer(params = {}) {
     ]
   };
   const sec4 = {
-    title: 'Equipment & Warranty',
+    title: 'Equipment, Porting & Warranty',
     bullets: [
       'Hardware sold once-off; ownership passes to Customer upon payment.',
       'Manufacturer warranties (typically 12 months, return-to-base) apply; excludes surges/liquids/abuse/unauthorised firmware.',
       'Loan devices may be offered at VoIP Shop’s discretion and current pricing.',
-      'Number porting timelines subject to donor carrier processes.'
+      'Number porting timelines subject to donor carrier processes; RICA requirements apply.'
     ]
   };
   const sec5 = {
-    title: 'Liability & Force Majeure',
+    title: 'Security, Fair Use & Recording',
     bullets: [
-      'No liability for indirect, consequential, or special damages, including loss of profit or business.',
-      'Liability cap: the lesser of 3 months’ service fees or R100,000.',
-      'Not liable for outages/delays due to third-party networks, power failures, or force majeure (e.g., load-shedding, strikes, disasters).'
+      'Customer must safeguard credentials and endpoints; unusual usage may trigger proactive suspensions.',
+      'Fair use applies to minutes and inclusive features to prevent abuse and protect network integrity.',
+      'If call recording is enabled, Customer is responsible for obtaining all required consents and retention policies (POPIA).',
+      'VoIP Shop may implement fraud controls and routing changes without notice to mitigate risk.'
     ]
   };
   const sec6 = {
-    title: 'Term, Suspension & Termination',
+    title: 'Maintenance, Changes & Escalations',
     bullets: [
-      `Month-to-month term; either party may cancel on ${noticeDays} days’ written notice.`,
-      'Non-payment may lead to suspension until all arrears are settled.',
-      'Upon termination, all unpaid fees become immediately due.'
+      'Planned maintenance will be scheduled outside business hours where possible; emergency maintenance may occur at short notice.',
+      'Configuration change requests (MACs) are handled as P3 tickets with 2–3 business day targets.',
+      'Escalation path available on request; critical incidents prioritised based on impact.'
     ]
   };
   const sec7 = {
+    title: 'Liability, Suspension & Termination',
+    bullets: [
+      'No liability for indirect, consequential, or special damages, including loss of profit or business.',
+      'Liability cap: the lesser of 3 months’ service fees or R100,000.',
+      `Month-to-month; either party may cancel on ${noticeDays} days’ written notice.`,
+      'Non-payment may lead to suspension until all arrears are settled; upon termination, unpaid fees are immediately due.'
+    ]
+  };
+  const sec8 = {
     title: 'General',
     bullets: [
       'This SLA forms part of the overall agreement (signed quotes/orders/policies). If conflicts arise, the latest signed quote/order prevails for pricing/line items.',
@@ -360,26 +454,32 @@ export async function buildSlaPdfBuffer(params = {}) {
     ]
   };
 
-  // Column 1
+  // Render columns
   let col = 0;
-  const sections = [sec1, sec2, sec3, sec4, sec5, sec6, sec7];
+  const sections = [sec1, sec2, sec3, sec4, sec5, sec6, sec7, sec8];
   doc.font('Helvetica').fontSize(7.8);
+  doc.y = colTop;
   for (let i = 0; i < sections.length; i++) {
     const x = colX(col);
-    // if next section won't reasonably fit, switch to next column
-    if (doc.y > colTop && doc.y + 60 > colBottom) { col += 1; doc.y = colTop; }
+    if (doc.y > colTop && doc.y + 60 > colBottom) { // move to next column
+      col += 1; doc.y = colTop;
+    }
     writeSection(x, sections[i].title, sections[i].bullets);
-    // small gap between sections
-    if (doc.y + 8 <= colBottom) { doc.y += 6; y = doc.y; }
-    // if we filled column, move to next
-    if (doc.y + 40 > colBottom && col === 0) { col = 1; doc.y = colTop; y = doc.y; }
+    if (doc.y + 8 <= colBottom) { doc.y += 6; }
+    if (doc.y + 40 > colBottom && col === 0) { col = 1; doc.y = colTop; }
   }
 
-  // Column dividers (subtle)
+  // Column divider
   doc.save();
   const midX = colX(0) + COL_W + (COL_GAP / 2);
   doc.moveTo(midX, colTop - 4).lineTo(midX, colBottom + 4).strokeColor('#F0F0F0').lineWidth(1).stroke();
   doc.restore();
+
+  // ---- Client Initials (bottom of page 2)
+  const initials2Y = pageBottom() - FOOTER_H - 8;
+  doc.font('Helvetica').fontSize(8).fillColor(MUTED)
+     .text('Client Initials:', L, initials2Y, { width: 90 });
+  doc.moveTo(L + 70, initials2Y + 10).lineTo(L + 170, initials2Y + 10).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
 
   // ---- Footer Page 2
   const footer2Y = doc.page.height - 24;
