@@ -202,6 +202,8 @@ export async function buildQuotePdfBuffer(q) {
     doc.moveTo(L, y + headH).lineTo(R, y + headH).strokeColor(line).stroke();
     y += headH + 2;
 
+// --- inside function table(...) just after the header row drawing ---
+
 // Body (robust minutes handling; safe defaults to avoid crashes)
 doc.font('Helvetica').fontSize(9.5).fillColor(ink);
 const zebra = ['#ffffff', '#fbfdff'];
@@ -229,18 +231,31 @@ if (!Array.isArray(items) || items.length === 0) {
     const qtyRaw  = Number(it.qty);
 
     // Minutes detection (very forgiving but safe)
-    const looksLikeCalls = /(?:^|\b)(?:calls?|minutes?)\b/i.test(name);
+    const looksLikeCalls = /(?:^|\b)(?:calls?|minutes?|bundle)\b/i.test(name);
+
+    // ⬇️ NEW: include a couple more common aliases + a fallback that parses minutes from the name
     const minuteCandidates = [
       it.minutes,
       it.qtyMinutes,
       it.minutesIncluded,
       it.includedMinutes,
       it.qty_min,
-      it.qty_mins
+      it.qty_mins,
+      it.qtyMin,        // NEW alias
+      it.qtyMins        // NEW alias
     ];
-    const itemMinutes = minuteCandidates
+
+    let itemMinutes = minuteCandidates
       .map(n => Number(n))
       .find(n => Number.isFinite(n) && n > 0) || 0;
+
+    // ⬇️ NEW: name-based fallback e.g. "Call Bundle 500", "500 minutes", "x500"
+    if (!itemMinutes) {
+      const m = name.match(/(\d{2,5})\s*(?:mins?|minutes?)\b/i)    // "500 minutes"
+             || name.match(/\bbundle\s*(\d{2,5})\b/i)             // "Bundle 500"
+             || name.match(/\bx\s*(\d{2,5})\b/i);                 // "x500"
+      if (m && Number(m[1]) > 0) itemMinutes = Number(m[1]);
+    }
 
     // Final minutes for this row
     const minutesForRow = itemMinutes > 0 ? itemMinutes : (looksLikeCalls ? safeGlobalMinutes : 0);
@@ -262,7 +277,7 @@ if (!Array.isArray(items) || items.length === 0) {
     // Otherwise (no bundle concept), we just do unit * qty like normal items.
     let amount = 0;
     if (isMinutesBundle) {
-      const bundleSize = Number(it.bundleSize || 250);
+      const bundleSize = Number(it.bundleSize || q?.meta?.bundleSize || 250); // slight enhancement: allow q.meta.bundleSize
       const bundles = (Number.isFinite(bundleSize) && bundleSize > 0)
         ? (minutesForRow / bundleSize)
         : 0;
