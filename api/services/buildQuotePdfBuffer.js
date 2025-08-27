@@ -202,48 +202,89 @@ export async function buildQuotePdfBuffer(q) {
     doc.moveTo(L, y + headH).lineTo(R, y + headH).strokeColor(line).stroke();
     y += headH + 2;
 
-    // Body
-    doc.font('Helvetica').fontSize(9.5).fillColor(ink);
-    const zebra = ['#ffffff', '#fbfdff'];
-    let rowIndex = 0;
-    let hiddenCount = 0;
+// Body (robust minutes handling; safe defaults to avoid crashes)
+doc.font('Helvetica').fontSize(9.5).fillColor(ink);
+const zebra = ['#ffffff', '#fbfdff'];
+let rowIndex = 0;
+let hiddenCount = 0;
 
-    if (!items?.length) {
-      if (ensureSpace(18)) {
-        doc.text('No items.', L + 8, y, { width: W - 16 });
-        y = doc.y + 4;
-      }
+// Guard: global minutes may be undefined outside this closure
+const safeGlobalMinutes = Number.isFinite(Number(globalMinutes)) ? Number(globalMinutes) : 0;
+
+if (!Array.isArray(items) || items.length === 0) {
+  if (ensureSpace(18)) {
+    doc.text('No items.', L + 8, y, { width: W - 16 });
+    y = doc.y + 4;
+  }
+} else {
+  for (let i = 0; i < items.length; i++) {
+    // Need room for a row + minimal totals later; if not, summarize and stop
+    if (!ensureSpace(150)) { hiddenCount = items.length - i; break; }
+
+    const it = items[i] || {};
+    const name = typeof it.name === 'string' ? it.name : String(it.name ?? '');
+
+    // Type-safe number coercions
+    const unitRaw = Number(it.unit);
+    const qtyRaw  = Number(it.qty);
+
+    // Minutes detection (very forgiving but safe)
+    const looksLikeCalls = /(?:^|\b)(?:calls?|minutes?)\b/i.test(name);
+    const minuteCandidates = [
+      it.minutes,
+      it.qtyMinutes,
+      it.minutesIncluded,
+      it.includedMinutes,
+      it.qty_min,
+      it.qty_mins
+    ];
+    const itemMinutes = minuteCandidates
+      .map(n => Number(n))
+      .find(n => Number.isFinite(n) && n > 0) || 0;
+
+    // Final minutes for this row
+    const minutesForRow = itemMinutes > 0 ? itemMinutes : (looksLikeCalls ? safeGlobalMinutes : 0);
+
+    // Only treat as minutes bundle on Monthly table
+    const isMinutesBundle = !!(monthly && minutesForRow > 0);
+
+    // Quantities & unit display
+    const qtyVal = isMinutesBundle
+      ? minutesForRow
+      : (Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1);
+
+    const unitDisplay = isMinutesBundle
+      ? 'minutes'
+      : money(Number.isFinite(unitRaw) ? unitRaw : 0);
+
+    // Amount:
+    // If you price minutes by bundle, we convert minutes to bundles using bundleSize (default 250);
+    // Otherwise (no bundle concept), we just do unit * qty like normal items.
+    let amount = 0;
+    if (isMinutesBundle) {
+      const bundleSize = Number(it.bundleSize || 250);
+      const bundles = (Number.isFinite(bundleSize) && bundleSize > 0)
+        ? (minutesForRow / bundleSize)
+        : 0;
+      amount = (Number.isFinite(unitRaw) ? unitRaw : 0) * bundles;
     } else {
-      for (let i = 0; i < items.length; i++) {
-        // Need room for a row + minimal totals later; if not, summarize and stop
-        if (!ensureSpace(150)) { hiddenCount = items.length - i; break; }
-
-        const it = items[i] || {};
-        const looksLikeCalls = /call|minute/i.test(String(it.name || ''));
-        const itemMinutes = Number(it.minutes ?? it.qtyMinutes ?? it.qty_min ?? 0);
-        const minutesForRow = itemMinutes || (looksLikeCalls ? globalMinutes : 0);
-
-        const isMinutesBundle = monthly && (minutesForRow > 0 || looksLikeCalls);
-
-        const qtyVal = isMinutesBundle ? (minutesForRow || 0) : Number(it.qty || 1);
-        const unitDisplay = isMinutesBundle ? 'minutes' : money(Number(it.unit || 0));
-        const amount = isMinutesBundle
-          ? Number(it.unit || 0)
-          : Number(it.unit || 0) * qtyVal;
-
-        // Row bg
-        doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
-        rowIndex++;
-
-        const rowTextY = y + 4;
-        doc.text(String(it.name || ''),  L + 8, rowTextY, { width: colW[0] - 10 });
-        doc.text(String(qtyVal || 0),    L + colW[0], rowTextY, { width: colW[1], align: 'right' });
-        doc.text(unitDisplay,            L + colW[0] + colW[1], rowTextY, { width: colW[2], align: 'right' });
-        doc.text(money(amount),          L + colW[0] + colW[1] + colW[2], rowTextY, { width: colW[3], align: 'right' });
-
-        y += rowH;
-      }
+      amount = (Number.isFinite(unitRaw) ? unitRaw : 0) * qtyVal;
     }
+    if (!Number.isFinite(amount)) amount = 0;
+
+    // Row bg
+    doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
+    rowIndex++;
+
+    const rowTextY = y + 4;
+    doc.text(name,                 L + 8,                        rowTextY, { width: colW[0] - 10 });
+    doc.text(String(qtyVal || 0),  L + colW[0],                  rowTextY, { width: colW[1], align: 'right' });
+    doc.text(unitDisplay,          L + colW[0] + colW[1],        rowTextY, { width: colW[2], align: 'right' });
+    doc.text(money(amount),        L + colW[0] + colW[1] + colW[2], rowTextY, { width: colW[3], align: 'right' });
+
+    y += rowH;
+  }
+}
 
     // Hidden rows notice
     if (hiddenCount > 0 && ensureSpace(rowH + 56)) {
