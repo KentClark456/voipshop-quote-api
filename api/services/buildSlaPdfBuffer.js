@@ -80,15 +80,14 @@ export async function buildSlaPdfBuffer(params = {}) {
     const contentTop  = cardTop + headerH + 6;
     const contentW    = w0 - innerPad * 2;
 
-    // We’ll render after we know height
-    // 1) Draw title
+    // Title
     doc.font('Helvetica-Bold').fontSize(10).fillColor(INK).text(title, titleX, titleY, { width: contentW });
 
-    // 2) Render content
+    // Content
     doc.y = contentTop; y = contentTop;
     contentCb({ x: contentLeft, w: contentW });
 
-    // 3) Compute height and draw the card
+    // Height and draw
     const contentBottom = y + 10;
     const hCard = Math.max(minHeight, contentBottom - cardTop);
 
@@ -96,7 +95,7 @@ export async function buildSlaPdfBuffer(params = {}) {
     doc.roundedRect(x0, cardTop, w0, hCard, 10).strokeColor(BORDER).lineWidth(1).stroke();
     doc.restore();
 
-    // 4) Cursor after card
+    // Cursor after card
     doc.y = cardTop + hCard + gapAfter; y = doc.y;
   };
 
@@ -172,152 +171,123 @@ export async function buildSlaPdfBuffer(params = {}) {
   };
 
   // ---- Header (Page 1) ----
-y = await drawLogoHeader(doc, {
-  logoUrl: company?.logoUrl,
-  align: 'right',
-  title: 'Service Level Agreement',
-  subtitle: company?.website || ''
-});
-y = Math.max(y, 70);
-doc.y = y;
+  y = await drawLogoHeader(doc, {
+    logoUrl: company?.logoUrl,
+    align: 'right',
+    title: 'Service Level Agreement',
+    subtitle: company?.website || ''
+  });
+  y = Math.max(y, 70);
+  doc.y = y;
 
-// ---- Meta strip
-if (hasSpace(24)) {
-  doc.save();
-  doc.rect(L, y, W, 20).fill(BG);
-  doc.restore();
-  doc.fillColor(BLUE).font('Helvetica-Bold').fontSize(9)
-    .text(`Agreement No: ${slaNumber}`, L + 10, y + 6, { continued: true })
-    .fillColor(MUTED).font('Helvetica').text(`  •  Effective: ${effectiveDateISO}`);
-  moveY(26);
-}
-
-// ✅ Parties — Details (Two-up in one card), tighter line height, no pills
-drawTwoUpCard('Parties — Details (Fill In)',
-  ({ lf }) => {
-    const tight = (label, val, w) => lf(label, val, w ?? 120);
-    tight('Provider Name',  company?.name || 'VoIP Shop');
-    tight('VAT Number',     company?.vat || '');
-    tight('Phone',          company?.phone || '');
-    tight('Email',          company?.email || '');
-    tight('Website',        company?.website || '');
-    tight('Address',        company?.address || '', 140);
-  },
-  ({ rf }) => {
-    const tight = (label, val, w) => rf(label, val, w ?? 120);
-    tight('Customer / Company', customer?.name || customer?.company || '');
-    tight('Reg Number',         customer?.reg || '');
-    tight('VAT Number',         customer?.vat || '');
-    tight('Contact Person',     customer?.contact || '');
-    tight('Phone',              customer?.phone || '');
-    tight('Email',              customer?.email || '');
-    tight('Service Address',    customer?.address || '', 140);
+  // ---- Meta strip
+  if (hasSpace(24)) {
+    doc.save();
+    doc.rect(L, y, W, 20).fill(BG);
+    doc.restore();
+    doc.fillColor(BLUE).font('Helvetica-Bold').fontSize(9)
+      .text(`Agreement No: ${slaNumber}`, L + 10, y + 6, { continued: true })
+      .fillColor(MUTED).font('Helvetica').text(`  •  Effective: ${effectiveDateISO}`);
+    moveY(26);
   }
-);
 
-// ---- Services Ordered — constants (shrink rows & reserved blocks)
-const rowH       = 10;   // was 11
-const FEES_MIN   = 54;   // was 72  -> shrink Fees card
-const DEBIT_MIN  = 128;  // was 150 -> more room for it by needing less reserve
-const INITIALS   = 24;   // was 28  -> slightly tighter initials line
-const FUDGE_HDR  = 28;   // was 40  -> tighter “header/totals” fudge
-
-// ↓ Inside the service rows loop, shrink note spacing
-if (it.note) {
-  const noteH = doc.heightOfString(it.note, { width: cW[0], lineGap: 0.1 });
-  doc.font('Helvetica-Oblique').fillColor(MUTED)
-     .text(it.note, rx[0], y - 1, { width: cW[0], lineGap: 0.1 });
-  doc.font('Helvetica').fillColor(MUTED);
-  moveY(Math.min(6, noteH)); // was Math.min(10, noteH)
-}
-
-// ---- Totals (monthly) — reduce padding and line spacing
-moveY(2); // was 3
-doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#E5E7EB').lineWidth(1).stroke();
-moveY(3); // was 5
-
-const labelW = 112; // was 120
-const valW   = 104; // was 110
-const valX   = x + w - valW;
-const labX   = valX - labelW - 6;
-
-const line = (label, val, bold=false) => {
-  doc.font(bold ? 'Helvetica-Bold' : 'Helvetica')
-     .fontSize(bold ? 8.4 : 8)                 // slightly smaller
-     .fillColor(bold ? INK : MUTED)
-     .text(label, labX, y, { width: labelW, align: 'right' });
-  doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(INK)
-     .text(money(val), valX, y, { width: valW, align: 'right' });
-  moveY(bold ? 9 : 8);                         // was 12
-};
-
-// ---- Fees & Billing (ultra-compact; no space between line items)
-drawCard('Fees & Billing', ({ x, w }) => {
-  const bullet = (t) => {
-    const lh = 9.2; // fixed line height for perfect stacking
-    const wrapW = w - 12;
-    // bullet dot
-    doc.circle(x + 3, y + 3.6, 0.85).fill('#6B7280');
-    // text with NO extra line gap
-    doc.fillColor(MUTED).font('Helvetica').fontSize(7.6)
-       .text(String(t||''), x + 8, y - 1, { width: wrapW, lineGap: 0 });
-    // advance by measured height but with zero extra padding
-    const h = doc.heightOfString(String(t||''), { width: wrapW, lineGap: 0 });
-    y += Math.max(lh, h); // no +2/+4 padding
-    doc.fillColor(INK);
-  };
-  bullet(`Monthly: ${money(ex)} ex VAT  •  ${money(inc)} incl VAT  •  VAT ${((Number(vatRate)||0)*100).toFixed(0)}%.`);
-  bullet(`Scope: ${serviceDescription}. Once-off (install/hardware/porting) per signed quote.`);
-  bullet('First invoice payable upfront before activation. Thereafter billed monthly in arrears (end of month).');
-  bullet('Payment via debit order or EFT by due date; late payment may suspend service and accrues interest at prime + 6%.');
-  bullet(`Term: Month-to-month; ${noticeDays}-day written notice to cancel.`);
-}, { minHeight: 54 }); // was 72
-
-// ---- Debit Order Mandate (spacious, signature inside; initials AFTER card)
-drawCard('Debit Order Mandate (Fill In)', (box) => {
-  const labelW = 140;
-  const fill = (label, preset = '', width = box.w - labelW - 22) => {
-    if (!hasSpace(18)) return;
-    const lx = box.x + labelW;
-    doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, box.x, y + 2, { width: labelW - 10 });
-    const ly = y + 11;
-    doc.moveTo(lx, ly).lineTo(lx + width, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-    if (preset) {
-      doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), lx + 2, y + 3, { width: width - 4, ellipsis: true });
+  // ✅ Parties — Details (Two-up in one card), tighter line height, no pills
+  drawTwoUpCard('Parties — Details (Fill In)',
+    ({ lf }) => {
+      const tight = (label, val, w) => lf(label, val, w ?? 120);
+      tight('Provider Name',  company?.name || 'VoIP Shop');
+      tight('VAT Number',     company?.vat || '');
+      tight('Phone',          company?.phone || '');
+      tight('Email',          company?.email || '');
+      tight('Website',        company?.website || '');
+      tight('Address',        company?.address || '', 140);
+    },
+    ({ rf }) => {
+      const tight = (label, val, w) => rf(label, val, w ?? 120);
+      tight('Customer / Company', customer?.name || customer?.company || '');
+      tight('Reg Number',         customer?.reg || '');
+      tight('VAT Number',         customer?.vat || '');
+      tight('Contact Person',     customer?.contact || '');
+      tight('Phone',              customer?.phone || '');
+      tight('Email',              customer?.email || '');
+      tight('Service Address',    customer?.address || '', 140);
     }
-    moveY(16);
-  };
-  fill('Account Holder', debitOrder?.accountName || '');
-  fill('Bank', debitOrder?.bank || '');
-  fill('Branch Code', debitOrder?.branchCode || '');
-  fill('Account Number', debitOrder?.accountNumber || '');
-  fill('Account Type (e.g., Cheque/Savings)', debitOrder?.accountType || '');
-  fill('Collection Day (1–31)', debitOrder?.dayOfMonth != null ? `Day ${debitOrder.dayOfMonth}` : '', 160);
-  fill('Mandate Date (YYYY-MM-DD)', debitOrder?.mandateDateISO || '', 200);
+  );
 
-  // Signature + Date ONLY (no initials here)
-  if (hasSpace(26)) {
-    const colW = (box.w - 20) / 2;
-    const sx1 = box.x, sx2 = box.x + colW + 20;
-    const sY = y + 6;
-    doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('Customer Signature', sx1, sY - 10);
-    doc.moveTo(sx1, sY).lineTo(sx1 + colW, sY).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-    doc.text('Date', sx2, sY - 10);
-    doc.moveTo(sx2, sY).lineTo(sx2 + colW, sY).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-    y = sY + 12; doc.y = y;
-  }
-}, { minHeight: 140 });
+  // ---- Monthly fee numbers for Fees & Billing
+  const ex  = Number.isFinite(Number(monthlyExVat)) ? Number(monthlyExVat) : 0;
+  const inc = Number.isFinite(Number(monthlyInclVat))
+    ? Number(monthlyInclVat)
+    : Math.round(ex * (1 + (Number(vatRate)||0)) * 100) / 100;
 
-// ---- Client Initials — keep tight at bottom
-const initialsY = pageBottom() - FOOTER_H - 8; // was -10
-doc.font('Helvetica').fontSize(8).fillColor(MUTED)
-   .text('Client Initials:', L, initialsY, { width: 90 });
-doc.moveTo(L + 70, initialsY + 8).lineTo(L + 170, initialsY + 8)
-   .strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-// ---- Footer Page 1
-const footer1Y = doc.page.height - 24;
-doc.font('Helvetica').fontSize(7).fillColor(MUTED)
-   .text(`Agreement No: ${slaNumber} • Page 1 of 2`, L, footer1Y, { width: W, align: 'right' });
+  // ---- Fees & Billing (ultra-compact; no space between line items)
+  drawCard('Fees & Billing', ({ x, w }) => {
+    const bullet = (t) => {
+      const lh = 9.2; // fixed line height for perfect stacking
+      const wrapW = w - 12;
+      // bullet dot
+      doc.circle(x + 3, y + 3.6, 0.85).fill('#6B7280');
+      // text with NO extra line gap
+      doc.fillColor(MUTED).font('Helvetica').fontSize(7.6)
+         .text(String(t||''), x + 8, y - 1, { width: wrapW, lineGap: 0 });
+      // advance by measured height but with zero extra padding
+      const h = doc.heightOfString(String(t||''), { width: wrapW, lineGap: 0 });
+      y += Math.max(lh, h); // no +2/+4 padding
+      doc.fillColor(INK);
+    };
+    bullet(`Monthly: ${money(ex)} ex VAT  •  ${money(inc)} incl VAT  •  VAT ${((Number(vatRate)||0)*100).toFixed(0)}%.`);
+    bullet(`Scope: ${serviceDescription}. Once-off (install/hardware/porting) per signed quote.`);
+    bullet('First invoice payable upfront before activation. Thereafter billed monthly in arrears (end of month).');
+    bullet('Payment via debit order or EFT by due date; late payment may suspend service and accrues interest at prime + 6%.');
+    bullet(`Term: Month-to-month; ${noticeDays}-day written notice to cancel.`);
+  }, { minHeight: 54 });
+
+  // ---- Debit Order Mandate (spacious, signature inside; initials AFTER card)
+  drawCard('Debit Order Mandate (Fill In)', (box) => {
+    const labelW = 140;
+    const fill = (label, preset = '', width = box.w - labelW - 22) => {
+      if (!hasSpace(18)) return;
+      const lx = box.x + labelW;
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, box.x, y + 2, { width: labelW - 10 });
+      const ly = y + 11;
+      doc.moveTo(lx, ly).lineTo(lx + width, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+      if (preset) {
+        doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), lx + 2, y + 3, { width: width - 4, ellipsis: true });
+      }
+      moveY(16);
+    };
+    fill('Account Holder', debitOrder?.accountName || '');
+    fill('Bank', debitOrder?.bank || '');
+    fill('Branch Code', debitOrder?.branchCode || '');
+    fill('Account Number', debitOrder?.accountNumber || '');
+    fill('Account Type (e.g., Cheque/Savings)', debitOrder?.accountType || '');
+    fill('Collection Day (1–31)', debitOrder?.dayOfMonth != null ? `Day ${debitOrder.dayOfMonth}` : '', 160);
+    fill('Mandate Date (YYYY-MM-DD)', debitOrder?.mandateDateISO || '', 200);
+
+    // Signature + Date ONLY (no initials here)
+    if (hasSpace(26)) {
+      const colW = (box.w - 20) / 2;
+      const sx1 = box.x, sx2 = box.x + colW + 20;
+      const sY = y + 6;
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('Customer Signature', sx1, sY - 10);
+      doc.moveTo(sx1, sY).lineTo(sx1 + colW, sY).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+      doc.text('Date', sx2, sY - 10);
+      doc.moveTo(sx2, sY).lineTo(sx2 + colW, sY).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+      y = sY + 12; doc.y = y;
+    }
+  }, { minHeight: 140 });
+
+  // ---- Client Initials — keep tight at bottom
+  const initialsY = pageBottom() - FOOTER_H - 8; // tight
+  doc.font('Helvetica').fontSize(8).fillColor(MUTED)
+     .text('Client Initials:', L, initialsY, { width: 90 });
+  doc.moveTo(L + 70, initialsY + 8).lineTo(L + 170, initialsY + 8)
+     .strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+
+  // ---- Footer Page 1
+  const footer1Y = doc.page.height - 24;
+  doc.font('Helvetica').fontSize(7).fillColor(MUTED)
+     .text(`Agreement No: ${slaNumber} • Page 1 of 2`, L, footer1Y, { width: W, align: 'right' });
 
   // =========================
   // PAGE 2 — Terms & Conditions (strict 2-column layout)
@@ -382,7 +352,6 @@ doc.font('Helvetica').fontSize(7).fillColor(MUTED)
     return true;
   };
 
-  // Content packs (added two new ones before General)
   const sections = [
     {
       title: 'Support & Service Levels',
@@ -423,7 +392,6 @@ doc.font('Helvetica').fontSize(7).fillColor(MUTED)
         'Number porting timelines subject to donor carrier processes; RICA requirements apply.'
       ]
     },
-    // NEW 1
     {
       title: 'Data Protection (POPIA)',
       bullets: [
@@ -433,7 +401,6 @@ doc.font('Helvetica').fontSize(7).fillColor(MUTED)
         'Any suspected breach must be reported without undue delay and cooperatively mitigated.'
       ]
     },
-    // NEW 2
     {
       title: 'Service Limitations & Exclusions',
       bullets: [
@@ -488,7 +455,7 @@ doc.font('Helvetica').fontSize(7).fillColor(MUTED)
 
   // Column divider (visual)
   doc.save();
-  const midX = colX(0) + COL_W + (COL_GAP / 2);
+  const midX = (L + COL_W) + (COL_GAP / 2);
   doc.moveTo(midX, colTop - 4).lineTo(midX, colBottom + 4).strokeColor('#F0F0F0').lineWidth(1).stroke();
   doc.restore();
 
