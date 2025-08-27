@@ -1,4 +1,4 @@
-// services/buildQuotePdfBuffer.js
+// services/buildInvoicePdfBuffer.js
 import PDFDocument from 'pdfkit';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -34,12 +34,12 @@ async function loadLogoBuffer(overrideUrl = '') {
 }
 
 /**
- * Single-page QUOTE PDF:
+ * Single-page INVOICE PDF:
  * - Tight, consistent spacing
  * - Hard one-page cap (no auto addPage)
  * - Minutes logic: Qty = minutes, Unit = "minutes", Amount = plan price
  */
-export async function buildQuotePdfBuffer(q) {
+export async function buildInvoicePdfBuffer(q) {
   // Always render compact to help 1-page fit
   const compact = true;
 
@@ -107,13 +107,13 @@ export async function buildQuotePdfBuffer(q) {
   })();
 
   doc.font('Helvetica-Bold').fontSize(20).fillColor(ink)
-    .text('Quote', L, headerTop, { width: W, align: 'right' })
+    .text('Invoice', L, headerTop, { width: W, align: 'right' })
     .moveDown(0.2);
 
-  doc.font('Helvetica').fontSize(9.5).fillColor(gray6)
-    .text(`Quote #: ${q.quoteNumber || ''}`, L, undefined, { width: W, align: 'right' })
-    .text(`Date: ${datePretty}`,            L, undefined, { width: W, align: 'right' })
-    .text(`Valid: ${Number(q.validDays ?? 7)} days`, L, undefined, { width: W, align: 'right' });
+doc.font('Helvetica').fontSize(9.5).fillColor(gray6)
+  .text(`Invoice #: ${(q.invoiceNumber ?? q.quoteNumber) || ''}`, L, undefined, { width: W, align: 'right' })
+  .text(`Date: ${datePretty}`,                                   L, undefined, { width: W, align: 'right' })
+  .text(`Valid: ${Number(q.validDays ?? 7)} days`,               L, undefined, { width: W, align: 'right' });
 
   // Company block
   doc.moveDown(1.0);
@@ -202,109 +202,109 @@ export async function buildQuotePdfBuffer(q) {
     doc.moveTo(L, y + headH).lineTo(R, y + headH).strokeColor(line).stroke();
     y += headH + 2;
 
-// Body
-doc.font('Helvetica').fontSize(9.5).fillColor(ink);
-const zebra = ['#ffffff', '#fbfdff'];
-let rowIndex = 0;
-let hiddenCount = 0;
+    // Body
+    doc.font('Helvetica').fontSize(9.5).fillColor(ink);
+    const zebra = ['#ffffff', '#fbfdff'];
+    let rowIndex = 0;
+    let hiddenCount = 0;
 
-if (!items?.length) {
-  if (ensureSpace(18)) {
-    doc.text('No items.', L + 8, y, { width: W - 16 });
-    y = doc.y + 4;
-  }
-} else {
-  for (let i = 0; i < items.length; i++) {
-    // Need room for a row + minimal totals later; if not, summarize and stop
-    if (!ensureSpace(150)) { hiddenCount = items.length - i; break; }
+    if (!items?.length) {
+      if (ensureSpace(18)) {
+        doc.text('No items.', L + 8, y, { width: W - 16 });
+        y = doc.y + 4;
+      }
+    } else {
+      for (let i = 0; i < items.length; i++) {
+        // Need room for a row + minimal totals later; if not, summarize and stop
+        if (!ensureSpace(150)) { hiddenCount = items.length - i; break; }
 
-    const it = items[i] || {};
-    const nameStr = String(it.name || '');
+        const it = items[i] || {};
+        const nameStr = String(it.name || '');
 
-    // ---- Minutes-aware detection ----
-    const isCallsFlag = it.isCalls === true || /^(calls)\s*$/i.test(nameStr);
-    const bundleSize  = Number(it.bundleSize || 250);     // default bundle size
-    const itemMinutes = Number(
-      it.minutes ??
-      it.qtyMinutes ??
-      it.minutesIncluded ??
-      it.includedMinutes ??
-      it.qty_min ??
-      it.qty_mins ??
-      it.mins ??
-      0
-    );
+        // ---- Minutes-aware detection ----
+        const isCallsFlag = it.isCalls === true || /^(calls)\s*$/i.test(nameStr);
+        const bundleSize  = Number(it.bundleSize || 250);     // default bundle size
+        const itemMinutes = Number(
+          it.minutes ??
+          it.qtyMinutes ??
+          it.minutesIncluded ??
+          it.includedMinutes ??
+          it.qty_min ??
+          it.qty_mins ??
+          it.mins ??
+          0
+        );
 
-    // If payload didn’t include minutes, use global fallback when it looks like calls/minutes
-    const looksLikeCalls = /call|min(ute)?s?/i.test(nameStr);
-    let minutesForRow = itemMinutes || ((isCallsFlag || looksLikeCalls) ? globalMinutes : 0);
+        // If payload didn’t include minutes, use global fallback when it looks like calls/minutes
+        const looksLikeCalls = /call|min(ute)?s?/i.test(nameStr);
+        let minutesForRow = itemMinutes || ((isCallsFlag || looksLikeCalls) ? globalMinutes : 0);
 
-    // Treat this as a minutes bundle only on the monthly table
-    let isMinutesBundle = monthly && (isCallsFlag || looksLikeCalls || minutesForRow > 0);
+        // Treat this as a minutes bundle only on the monthly table
+        let isMinutesBundle = monthly && (isCallsFlag || looksLikeCalls || minutesForRow > 0);
 
-    // If still zero minutes but qty>0 on a calls row, interpret qty as #bundles → minutes
-    if (isMinutesBundle && minutesForRow === 0 && Number(it.qty) > 0) {
-      minutesForRow = Number(it.qty) * bundleSize;
+        // If still zero minutes but qty>0 on a calls row, interpret qty as #bundles → minutes
+        if (isMinutesBundle && minutesForRow === 0 && Number(it.qty) > 0) {
+          minutesForRow = Number(it.qty) * bundleSize;
+        }
+
+        // Final render values
+        const qtyVal      = isMinutesBundle ? minutesForRow : Number(it.qty || 1);
+        const unitDisplay = isMinutesBundle ? 'minutes' : money(Number(it.unit || 0));
+
+        // Amount: for minutes bundles, charge per bundle (not per minute)
+        const bundles = isMinutesBundle
+          ? (bundleSize > 0 ? (minutesForRow / bundleSize) : 0)
+          : Number(it.qty || 1);
+
+        const amount = Number(it.unit || 0) * bundles;
+
+        // Row bg
+        doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
+        rowIndex++;
+
+        const rowTextY = y + 4;
+        doc.text(String(it.name || ''),  L + 8, rowTextY, { width: colW[0] - 10 });
+        doc.text(String(qtyVal || 0),    L + colW[0], rowTextY, { width: colW[1], align: 'right' });
+        doc.text(unitDisplay,            L + colW[0] + colW[1], rowTextY, { width: colW[2], align: 'right' });
+        doc.text(money(amount),          L + colW[0] + colW[1] + colW[2], rowTextY, { width: colW[3], align: 'right' });
+
+        y += rowH;
+      }
     }
 
-    // Final render values
-    const qtyVal      = isMinutesBundle ? minutesForRow : Number(it.qty || 1);
-    const unitDisplay = isMinutesBundle ? 'minutes' : money(Number(it.unit || 0));
+    // Hidden rows notice
+    if (hiddenCount > 0 && ensureSpace(rowH + 56)) {
+      doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
+      doc.font('Helvetica-Oblique').fontSize(9).fillColor(gray6)
+        .text(`+ ${hiddenCount} more item${hiddenCount > 1 ? 's' : ''} included in totals`,
+              L + 8, y + 4, { width: W - 16 });
+      y += rowH;
+    }
 
-    // Amount: for minutes bundles, charge per bundle (not per minute)
-    const bundles = isMinutesBundle
-      ? (bundleSize > 0 ? (minutesForRow / bundleSize) : 0)
-      : Number(it.qty || 1);
+    // Totals
+    if (ensureSpace(58)) {
+      doc.moveTo(L, y).lineTo(R, y).strokeColor(line).stroke();
+      y += 8;
 
-    const amount = Number(it.unit || 0) * bundles;
+      const labelW = 128;
+      const valW   = 108;
+      const valX   = R - valW;
+      const labelX = valX - labelW - 8;
 
-    // Row bg
-    doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
-    rowIndex++;
+      const totalLine = (label, val, bold = false) => {
+        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(9.8).fillColor(bold ? ink : gray6)
+          .text(label, labelX, y, { width: labelW, align: 'right' });
+        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(ink)
+          .text(money(val), valX, y, { width: valW, align: 'right' });
+        y += 14;
+      };
 
-    const rowTextY = y + 4;
-    doc.text(String(it.name || ''),  L + 8, rowTextY, { width: colW[0] - 10 });
-    doc.text(String(qtyVal || 0),    L + colW[0], rowTextY, { width: colW[1], align: 'right' });
-    doc.text(unitDisplay,            L + colW[0] + colW[1], rowTextY, { width: colW[2], align: 'right' });
-    doc.text(money(amount),          L + colW[0] + colW[1] + colW[2], rowTextY, { width: colW[3], align: 'right' });
+      totalLine('Subtotal', subtotalEx);
+      totalLine(`VAT (${Math.round(vatRate * 100)}%)`, vatAmt);
+      totalLine(monthly ? 'Total / month' : 'Total (once-off)', totalInc, true);
+    }
 
-    y += rowH;
-  }
-}
-
-// Hidden rows notice
-if (hiddenCount > 0 && ensureSpace(rowH + 56)) {
-  doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
-  doc.font('Helvetica-Oblique').fontSize(9).fillColor(gray6)
-    .text(`+ ${hiddenCount} more item${hiddenCount > 1 ? 's' : ''} included in totals`,
-          L + 8, y + 4, { width: W - 16 });
-  y += rowH;
-}
-
-// Totals
-if (ensureSpace(58)) {
-  doc.moveTo(L, y).lineTo(R, y).strokeColor(line).stroke();
-  y += 8;
-
-  const labelW = 128;
-  const valW   = 108;
-  const valX   = R - valW;
-  const labelX = valX - labelW - 8;
-
-  const totalLine = (label, val, bold = false) => {
-    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(9.8).fillColor(bold ? ink : gray6)
-      .text(label, labelX, y, { width: labelW, align: 'right' });
-    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(ink)
-      .text(money(val), valX, y, { width: valW, align: 'right' });
-    y += 14;
-  };
-
-  totalLine('Subtotal', subtotalEx);
-  totalLine(`VAT (${Math.round(vatRate * 100)}%)`, vatAmt);
-  totalLine(monthly ? 'Total / month' : 'Total (once-off)', totalInc, true);
-}
-
-doc.y = y + 4;
+    doc.y = y + 4;
   };
 
   // Stamp (first page only)
@@ -315,7 +315,7 @@ doc.y = y + 4;
   doc.moveDown(0.4);
   table('Monthly Charges', q.itemsMonthly || [], monSub, monVat, monTotal, true);
 
-  // Pay-now band
+  // Pay-now band (unchanged per your request)
   if (ensureSpace(40)) {
     const yBand = doc.y + 2;
     const bandH = 28;
