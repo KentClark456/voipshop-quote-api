@@ -17,7 +17,7 @@ export async function buildSlaPdfBuffer(params = {}) {
 
     // services can be passed directly (fallback will derive from checkout monthly items)
     services = [],
-    itemsMonthly = [],              // e.g. [{name, qty, unit, minutes?}]
+    itemsMonthly = [],              // e.g. [{name, qty, unit, minutes?}] where unit is unit price (number) when available
     minutesIncluded = 0,            // fallback
 
     debitOrder = {},
@@ -30,6 +30,10 @@ export async function buildSlaPdfBuffer(params = {}) {
   const BG     = '#F5F5F7';
   const BORDER = '#E5E7EB';
   const BLUE   = '#0B63E6';
+
+  // ---- Utils ----
+  const money = (n) =>
+    'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   // ---- Doc (force max 2 pages) ----
   const doc = new PDFDocument({ size: 'A4', margin: 32 });
@@ -54,131 +58,117 @@ export async function buildSlaPdfBuffer(params = {}) {
   const hasSpace = (need) => doc.y <= (pageBottom() - (need + FOOTER_H));
   const moveY = (amt=0) => { y = (doc.y = (doc.y + amt)); };
 
-  // ---------- Card helpers ----------
-  // Increased padTop + larger inter-card gap so the pill sits clearly above its card content,
-  // and there’s space before the next card begins.
+  // ---------- Card helpers (NO pills, titles inside card) ----------
   const drawCard = (title, contentCb, options = {}) => {
     const {
-      padTop = 26,      // was 18
-      minHeight = 72,   // was 64
-      titleMax = 260,
-      gapAfter = 14     // added; gap after each card so pills never crowd the next card
+      headerH = 18,     // title area inside the card
+      minHeight = 72,
+      gapAfter = 12,
+      innerPad = 12
     } = options;
 
     const cardTop = y;
-    const innerLeft = L + 12;
-    const maxW = W - 24;
+    const x0 = L;
+    const w0 = W;
 
-    // Leave room for title pill
-    const startY = y + padTop;
-    doc.y = startY; y = startY;
+    // Title + content area
+    const titleX = x0 + innerPad;
+    const titleY = cardTop + 8;
 
-    contentCb({ x: innerLeft, w: maxW });
+    // Reserve space for header area, then render content
+    const contentLeft = x0 + innerPad;
+    const contentTop  = cardTop + headerH + 6;
+    const contentW    = w0 - innerPad * 2;
 
-    // Finalize card
-    const cardBottom = y + 12;
-    const hCard = Math.max(minHeight, cardBottom - cardTop);
+    // We’ll render after we know height
+    // 1) Draw title
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(INK).text(title, titleX, titleY, { width: contentW });
+
+    // 2) Render content
+    doc.y = contentTop; y = contentTop;
+    contentCb({ x: contentLeft, w: contentW });
+
+    // 3) Compute height and draw the card
+    const contentBottom = y + 10;
+    const hCard = Math.max(minHeight, contentBottom - cardTop);
 
     doc.save();
-    doc.roundedRect(L, cardTop, W, hCard, 10).strokeColor(BORDER).lineWidth(1).stroke();
-
-    // Title pill slightly above the card, not touching next section
-    const titleW = Math.min(titleMax, doc.widthOfString(title, { font: 'Helvetica-Bold', size: 9 }) + 28);
-    const pillY = cardTop - 12; // a bit higher so it “floats” cleanly
-    doc.roundedRect(L + 12, pillY, titleW, 24, 12).fillColor('white').fill();
-    doc.roundedRect(L + 12, pillY, titleW, 24, 12).strokeColor(BORDER).lineWidth(1).stroke();
-    doc.fillColor(INK).font('Helvetica-Bold').fontSize(9.5)
-       .text(title, L + 12 + 12, pillY + 6, { width: titleW - 24, align: 'left' });
+    doc.roundedRect(x0, cardTop, w0, hCard, 10).strokeColor(BORDER).lineWidth(1).stroke();
     doc.restore();
 
-    // Cursor after card with extra gap
+    // 4) Cursor after card
     doc.y = cardTop + hCard + gapAfter; y = doc.y;
   };
 
-  const lineFill = ({ x, w }, label, preset = '', lineW = w * 0.6) => {
-    if (!hasSpace(22)) return;
-    const labelW = Math.min(160, Math.max(110, w * 0.30));
-    const lx = x;
-    doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, lx, y + 2, { width: labelW - 8 });
-    const sx = lx + labelW;
-    const ly = y + 13;
-    doc.moveTo(sx, ly).lineTo(sx + lineW, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-    if (preset) {
-      doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), sx + 2, y + 4, { width: lineW - 6, ellipsis: true });
-    }
-    moveY(19);
-  };
-
-  // 2-up (left/right) fields inside a single card with a vertical divider
+  // 2-up (left/right) fields inside a single card with a vertical divider, NO pill
   const drawTwoUpCard = (title, leftCb, rightCb) => {
-    const cardTop = y;
-    const padTop = 26; // match drawCard
-    const startY = y + padTop;
     const innerPad = 12;
+    const headerH = 18;
+    const colGap  = 18;
 
-    const colGap = 18;
-    const colW = (W - (innerPad*2) - colGap);
-    const colWidth = colW / 2;
+    const cardTop = y;
+    const x0 = L, w0 = W;
 
-    // Render into columns
-    const leftX  = L + innerPad;
-    const rightX = leftX + colWidth + colGap;
-    const innerTop = startY;
+    // Title
+    const titleX = x0 + innerPad;
+    const titleY = cardTop + 8;
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(INK).text(title, titleX, titleY, { width: w0 - innerPad * 2 });
+
+    // Column geometry
+    const innerLeft = x0 + innerPad;
+    const innerTop  = cardTop + headerH + 6;
+    const colsW     = w0 - innerPad * 2 - colGap;
+    const colW      = colsW / 2;
+    const leftX     = innerLeft;
+    const rightX    = innerLeft + colW + colGap;
 
     let yLeft = innerTop;
     let yRight = innerTop;
 
-    const lf = (label, preset = '', lineW = colWidth * 0.62) => {
-      if (yLeft + 22 > pageBottom() - FOOTER_H - 12) return;
-      const labelW = Math.min(150, Math.max(110, colWidth * 0.38));
+    const lf = (label, preset = '', lineW = colW * 0.62) => {
+      if (yLeft + 20 > pageBottom() - FOOTER_H - 10) return;
+      const labelW = Math.min(150, Math.max(110, colW * 0.38));
       doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, leftX, yLeft + 2, { width: labelW - 8 });
       const sx = leftX + labelW;
-      const ly = yLeft + 13;
+      const ly = yLeft + 12;
       doc.moveTo(sx, ly).lineTo(sx + lineW, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
       if (preset) doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), sx + 2, yLeft + 4, { width: lineW - 6, ellipsis: true });
-      yLeft += 19;
+      yLeft += 18;
     };
-    const rf = (label, preset = '', lineW = colWidth * 0.62) => {
-      if (yRight + 22 > pageBottom() - FOOTER_H - 12) return;
-      const labelW = Math.min(150, Math.max(110, colWidth * 0.38));
+    const rf = (label, preset = '', lineW = colW * 0.62) => {
+      if (yRight + 20 > pageBottom() - FOOTER_H - 10) return;
+      const labelW = Math.min(150, Math.max(110, colW * 0.38));
       doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, rightX, yRight + 2, { width: labelW - 8 });
       const sx = rightX + labelW;
-      const ly = yRight + 13;
+      const ly = yRight + 12;
       doc.moveTo(sx, ly).lineTo(sx + lineW, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
       if (preset) doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), sx + 2, yRight + 4, { width: lineW - 6, ellipsis: true });
-      yRight += 19;
+      yRight += 18;
     };
 
     // Column headings
-    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK).text('Provider Details', leftX, innerTop);
-    yLeft += 16;
-    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK).text('Customer Details', rightX, innerTop);
-    yRight += 16;
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text('Provider Details', leftX, innerTop - 2);
+    yLeft += 12;
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text('Customer Details', rightX, innerTop - 2);
+    yRight += 12;
 
     // Fill each column
-    leftCb({ lf, leftX, colWidth });
-    rightCb({ rf, rightX, colWidth });
+    leftCb({ lf, leftX, colW });
+    rightCb({ rf, rightX, colW });
 
-    // Compute card height based on the taller column
-    const contentBottom = Math.max(yLeft, yRight) + 10;
+    // Height and draw
+    const contentBottom = Math.max(yLeft, yRight) + 8;
     const hCard = Math.max(96, (contentBottom - cardTop));
 
-    // Draw card + divider + pill
     doc.save();
-    doc.roundedRect(L, cardTop, W, hCard, 10).strokeColor(BORDER).lineWidth(1).stroke();
-
-    const midX = leftX + colWidth + (colGap / 2);
-    doc.moveTo(midX, innerTop - 6).lineTo(midX, cardTop + hCard - 10).strokeColor('#EFEFEF').lineWidth(1).stroke();
-
-    const titleW = Math.min(280, doc.widthOfString(title, { font: 'Helvetica-Bold', size: 9 }) + 28);
-    const pillY = cardTop - 12;
-    doc.roundedRect(L + 12, pillY, titleW, 24, 12).fillColor('white').fill();
-    doc.roundedRect(L + 12, pillY, titleW, 24, 12).strokeColor(BORDER).lineWidth(1).stroke();
-    doc.fillColor(INK).font('Helvetica-Bold').fontSize(9.5).text(title, L + 24, pillY + 6, { width: titleW - 24, align: 'left' });
+    doc.roundedRect(x0, cardTop, w0, hCard, 10).strokeColor(BORDER).lineWidth(1).stroke();
+    // Divider
+    const midX = leftX + colW + (colGap / 2);
+    doc.moveTo(midX, innerTop - 6).lineTo(midX, cardTop + hCard - 8).strokeColor('#EFEFEF').lineWidth(1).stroke();
     doc.restore();
 
-    // Cursor after card + generous gap
-    doc.y = cardTop + hCard + 14; y = doc.y;
+    // Cursor after card
+    doc.y = cardTop + hCard + 12; y = doc.y;
   };
 
   // ---- Header (Page 1) ----
@@ -202,9 +192,7 @@ export async function buildSlaPdfBuffer(params = {}) {
     moveY(26);
   }
 
-  // ❌ REMOVED: simple "Parties" summary list at the top to free space.
-
-  // ✅ KEEP: Parties — Details (Two-up in one card)
+  // ✅ Parties — Details (Two-up in one card) — NO pills, tighter
   drawTwoUpCard('Parties — Details (Fill In)',
     ({ lf }) => {
       lf('Provider Name', company?.name || 'VoIP Shop');
@@ -225,8 +213,9 @@ export async function buildSlaPdfBuffer(params = {}) {
     }
   );
 
-  // ---- Services Ordered — derive if not provided
+  // ---- Services Ordered — derive + pricing table
   const deriveServices = () => {
+    // Prefer explicit services array if provided
     if (Array.isArray(services) && services.length) return services;
     if (!Array.isArray(itemsMonthly) || !itemsMonthly.length) return [];
     const globMin = Number(minutesIncluded || 0);
@@ -239,82 +228,136 @@ export async function buildSlaPdfBuffer(params = {}) {
         it?.includedMinutes ??
         0
       ) || (looksLikeCalls ? globMin : 0);
+
+      // unit here is expected to be unit PRICE when present (from checkout collection)
+      const unitPrice = Number(it?.unit);
+      const qtyBase   = looksLikeCalls ? (mins || 0) : Number(it?.qty || 1);
+      const qty       = Number.isFinite(qtyBase) && qtyBase > 0 ? qtyBase : 1;
+
       return {
         name,
-        qty: looksLikeCalls ? (mins || 0) : Number(it?.qty || 1),
-        unit: looksLikeCalls ? 'minutes' : (it?.unit || 'ea'),
+        qty,
+        unitPrice: Number.isFinite(unitPrice) ? unitPrice : 0,
         note: looksLikeCalls && mins ? `Includes ${mins} minutes` : ''
       };
     });
   };
   const svc = deriveServices();
 
-  // ---- Services Ordered (own card)
   drawCard('Services Ordered (Monthly)', ({ x, w }) => {
+    // Header
+    const cW = [ w * 0.52, w * 0.12, w * 0.16, w * 0.20 ]; // Description, Qty, Unit Price, Line Total
+    const rx = [ x, x + cW[0], x + cW[0] + cW[1], x + cW[0] + cW[1] + cW[2] ];
+    doc.font('Helvetica-Bold').fontSize(8.5).fillColor(INK);
+    doc.text('Description', rx[0], y, { width: cW[0] });
+    doc.text('Qty',         rx[1], y, { width: cW[1], align: 'right' });
+    doc.text('Unit Price',  rx[2], y, { width: cW[2], align: 'right' });
+    doc.text('Line Total',  rx[3], y, { width: cW[3], align: 'right' });
+    moveY(10);
+    doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#D1D5DB').lineWidth(1).stroke();
+    moveY(6);
+
     if (!svc.length) {
       doc.font('Helvetica').fontSize(8).fillColor(MUTED)
-        .text('No monthly service lines were supplied. (Pass `services` OR `itemsMonthly` + `minutesIncluded`.)', x, y, { width: w });
+         .text('No monthly service lines were supplied. (Pass `services` OR `itemsMonthly` + `minutesIncluded`.)', x, y, { width: w });
       moveY(12);
       return;
     }
-    const maxRows = 6;
-    doc.font('Helvetica-Bold').fontSize(8).fillColor(INK)
-      .text('Item', x, y, { width: w * 0.60 })
-      .text('Qty',  x + w * 0.62, y, { width: w * 0.12, align: 'right' })
-      .text('Notes',x + w * 0.76, y, { width: w * 0.24 });
-    moveY(10);
-    doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#D1D5DB').stroke(); moveY(6);
+
+    doc.font('Helvetica').fontSize(8).fillColor(MUTED);
+    let subtotal = 0;
+    const rowH = 12;
+    const maxRows = 8;
 
     for (let i = 0; i < Math.min(svc.length, maxRows); i++) {
-      const { name, qty, unit, note } = svc[i];
-      const qtyTxt = (qty != null) ? `${qty}${unit ? ' ' + unit : ''}` : '—';
-      doc.font('Helvetica').fontSize(8).fillColor(MUTED)
-        .text(name || '', x, y, { width: w * 0.60 })
-        .text(qtyTxt, x + w * 0.62, y, { width: w * 0.12, align: 'right' })
-        .text(note || '', x + w * 0.76, y, { width: w * 0.24 });
-      moveY(12);
+      const it = svc[i];
+      const lineTotal = (Number(it.unitPrice) || 0) * (Number(it.qty) || 0);
+      subtotal += Number.isFinite(lineTotal) ? lineTotal : 0;
+
+      // row
+      doc.text(it.name || '', rx[0], y, { width: cW[0] });
+      doc.text(String(it.qty || 0), rx[1], y, { width: cW[1], align: 'right' });
+      doc.text(it.unitPrice > 0 ? money(it.unitPrice) : '—', rx[2], y, { width: cW[2], align: 'right' });
+      doc.text(money(lineTotal), rx[3], y, { width: cW[3], align: 'right' });
+      moveY(rowH);
+
+      if (it.note) {
+        doc.font('Helvetica-Oblique').fillColor(MUTED)
+           .text(it.note, rx[0], y - 2, { width: cW[0] });
+        doc.font('Helvetica').fillColor(MUTED);
+        moveY(rowH - 6);
+      }
     }
+
     const remaining = Math.max(0, svc.length - maxRows);
     if (remaining > 0) {
-      doc.font('Helvetica-Oblique').fontSize(8).fillColor(MUTED).text(`+${remaining} more item(s)`, x, y);
+      doc.font('Helvetica-Oblique').fontSize(8).fillColor(MUTED)
+         .text(`+${remaining} more item(s) included in totals`, x, y, { width: w });
       moveY(10);
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED);
     }
-  }, { minHeight: 90 });
 
-  // ---- Fees & Billing (compact card)
+    // Totals (monthly)
+    const vat = subtotal * Number(vatRate || 0);
+    const total = subtotal + vat;
+
+    moveY(4);
+    doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#E5E7EB').lineWidth(1).stroke();
+    moveY(6);
+
+    const labelW = 110;
+    const valW   = 110;
+    const valX   = x + w - valW;
+    const labX   = valX - labelW - 8;
+
+    const line = (label, val, bold=false) => {
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(9).fillColor(bold ? INK : MUTED)
+         .text(label, labX, y, { width: labelW, align: 'right' });
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(INK)
+         .text(money(val), valX, y, { width: valW, align: 'right' });
+      moveY(14);
+    };
+
+    line('Monthly Subtotal (ex VAT)', subtotal);
+    line(`VAT (${Math.round(Number(vatRate||0)*100)}%)`, vat);
+    line('Monthly Total (incl VAT)', total, true);
+  }, { minHeight: 120 });
+
+  // ---- Fees & Billing (more compact)
   const ex  = Number.isFinite(monthlyExVat) ? monthlyExVat : 0;
   const inc = Number.isFinite(monthlyInclVat) ? monthlyInclVat
             : Math.round(ex * (1 + (Number(vatRate)||0)) * 100) / 100;
 
   drawCard('Fees & Billing', ({ x, w }) => {
-    const bullet = (t) => {
-      const est = 12 + doc.heightOfString(String(t||''), { width: w - 16, lineGap: 0.6 });
-      if (!hasSpace(est)) return;
-      doc.circle(x + 2.5, y + 3.2, 1.1).fill('#6B7280');
-      doc.fillColor(MUTED).font('Helvetica').fontSize(8).text(t, x + 8, y, { width: w - 16, lineGap: 0.6 });
-      moveY(doc.heightOfString(String(t||''), { width: w - 16, lineGap: 0.6 }) + 4);
+    const one = (t) => {
+      const est = doc.heightOfString(String(t||''), { width: w - 12, lineGap: 0.3 }); // tighter
+      if (!hasSpace(est + 6)) return;
+      doc.circle(x + 2.5, y + 3.0, 1.0).fill('#6B7280');
+      doc.fillColor(MUTED).font('Helvetica').fontSize(8)
+         .text(t, x + 8, y, { width: w - 12, lineGap: 0.3 });
+      moveY(est + 3);
       doc.fillColor(INK);
     };
-    bullet(`Monthly: R ${ex.toFixed(2)} ex VAT  •  R ${inc.toFixed(2)} incl VAT  •  VAT ${((Number(vatRate)||0)*100).toFixed(0)}%.`);
-    bullet(`Scope: ${serviceDescription}. Once-off (install/hardware/porting) per signed quote.`);
-    bullet('First invoice is payable upfront before activation. Thereafter, billed monthly in arrears (end of month).');
-    bullet('Payment via debit order or EFT by due date; late payment may suspend service and accrues interest at prime + 6%.');
-    bullet(`Term: Month-to-month; ${noticeDays}-day written notice to cancel.`);
-  }, { minHeight: 96 });
+    one(`Monthly: ${money(ex)} ex VAT  •  ${money(inc)} incl VAT  •  VAT ${((Number(vatRate)||0)*100).toFixed(0)}%.`);
+    one(`Scope: ${serviceDescription}. Once-off (install/hardware/porting) per signed quote.`);
+    one('First invoice is payable upfront before activation. Thereafter, billed monthly in arrears (end of month).');
+    one('Payment via debit order or EFT by due date; late payment may suspend service and accrues interest at prime + 6%.');
+    one(`Term: Month-to-month; ${noticeDays}-day written notice to cancel.`);
+  }, { minHeight: 88 });
 
-  // ---- Debit Order Mandate (spacious)
+  // ---- Debit Order Mandate (spacious, signature inside; initials AFTER card)
   drawCard('Debit Order Mandate (Fill In)', (box) => {
     const labelW = 140;
     const fill = (label, preset = '', width = box.w - labelW - 22) => {
-      if (!hasSpace(22)) return;
+      if (!hasSpace(20)) return;
       const lx = box.x + labelW;
       doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, box.x, y + 2, { width: labelW - 10 });
-      const ly = y + 13;
+      const ly = y + 12;
       doc.moveTo(lx, ly).lineTo(lx + width, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
       if (preset) {
         doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), lx + 2, y + 4, { width: width - 4, ellipsis: true });
       }
-      moveY(19);
+      moveY(18);
     };
     fill('Account Holder', debitOrder?.accountName || '');
     fill('Bank', debitOrder?.bank || '');
@@ -324,20 +367,20 @@ export async function buildSlaPdfBuffer(params = {}) {
     fill('Collection Day (1–31)', debitOrder?.dayOfMonth != null ? `Day ${debitOrder.dayOfMonth}` : '', 160);
     fill('Mandate Date (YYYY-MM-DD)', debitOrder?.mandateDateISO || '', 200);
 
-    // signatures inline (clear spacing)
-    if (hasSpace(32)) {
+    // Signature + Date ONLY (no initials here)
+    if (hasSpace(30)) {
       const colW = (box.w - 20) / 2;
       const sx1 = box.x, sx2 = box.x + colW + 20;
-      const sY = y + 10;
+      const sY = y + 8;
       doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('Customer Signature', sx1, sY - 12);
       doc.moveTo(sx1, sY).lineTo(sx1 + colW, sY).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
       doc.text('Date', sx2, sY - 12);
       doc.moveTo(sx2, sY).lineTo(sx2 + colW, sY).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-      y = sY + 16; doc.y = y;
+      y = sY + 14; doc.y = y;
     }
-  }, { minHeight: 160, titleMax: 260 });
+  }, { minHeight: 150 });
 
-  // ---- Client Initials (bottom of page 1)
+  // ---- Client Initials (AFTER the debit order card, at bottom of page 1)
   const initialsY = pageBottom() - FOOTER_H - 10;
   doc.font('Helvetica').fontSize(8).fillColor(MUTED)
      .text('Client Initials:', L, initialsY, { width: 90 });
