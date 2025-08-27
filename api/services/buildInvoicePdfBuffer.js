@@ -34,7 +34,7 @@ async function loadLogoBuffer(overrideUrl = '') {
 }
 
 /**
- * Single-page Invoice PDF (compact).
+ * Single-page Invoice PDF (compact, full-page utilization).
  */
 export async function buildInvoicePdfBuffer(q = {}) {
   const margin = 36;
@@ -67,6 +67,7 @@ export async function buildInvoicePdfBuffer(q = {}) {
   // Helper: ensure there is space (optionally at a proposed y position)
   const FOOTER_H = 28;
   const ensureSpace = (need, yPos = doc.y) => (yPos <= pageBottom() - (need + FOOTER_H));
+  const spaceLeft  = () => (pageBottom() - FOOTER_H - doc.y);
 
   // Optional stamp
   const paintStamp = (text) => {
@@ -137,12 +138,12 @@ export async function buildInvoicePdfBuffer(q = {}) {
   const grandPayNow = onceTotal + monTotal;
 
   // Summary cards
-  const yStart = doc.y + 8;
+  const yStart = doc.y + 10;
   const gap = 10;
   const cardH = 40;
   const cardW = (W - gap) / 2;
 
-  if (ensureSpace(cardH + 10)) {
+  if (ensureSpace(cardH + 12, yStart)) {
     const card = (x, y, w, h, title, valueTxt, subtitle) => {
       doc.save().roundedRect(x, y, w, h, 10).fill(pill).restore();
       doc.roundedRect(x, y, w, h, 10).strokeColor(line).stroke();
@@ -155,7 +156,7 @@ export async function buildInvoicePdfBuffer(q = {}) {
     };
     card(L, yStart, cardW, cardH, 'MONTHLY', money(monTotal), '/month');
     card(L + cardW + gap, yStart, cardW, cardH, 'ONCE-OFF', money(onceTotal), 'setup');
-    doc.y = yStart + cardH + 8;
+    doc.y = yStart + cardH + 12; // give more air after cards
   }
 
   // Global minutes fallback
@@ -171,20 +172,20 @@ export async function buildInvoicePdfBuffer(q = {}) {
   // TABLE (compact, one page)
   const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
     const colW = [ W * 0.58, W * 0.12, W * 0.12, W * 0.18 ];
-    const headH = 14;
-    const rowH  = 16; // SLIM rows
-    let y = doc.y;
+    const headH = 16;
+    const rowH  = 16; // slim rows
+    let y = doc.y + 6; // <-- give headings some breathing room
 
     // Title
-    if (!ensureSpace(22, y)) return;
-    doc.font('Helvetica-Bold').fontSize(11).fillColor(ink).text(title, L, y, { width: W });
-    y += 3;
+    if (!ensureSpace(24, y)) return;
+    doc.font('Helvetica-Bold').fontSize(11.5).fillColor(ink).text(title, L, y, { width: W });
+    y += 5;
 
     // Header
     if (!ensureSpace(headH + 2, y)) return;
     doc.save().rect(L, y, W, headH).fill(thbg).restore();
-    doc.font('Helvetica-Bold').fontSize(9).fillColor(ink);
-    const headY = y + 2;
+    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(ink);
+    const headY = y + 3;
     doc.text('Description', L + 8, headY, { width: colW[0] - 10 });
     doc.text('Qty',         L + colW[0], headY, { width: colW[1], align: 'right' });
     doc.text('Unit',        L + colW[0] + colW[1], headY, { width: colW[2], align: 'right' });
@@ -203,7 +204,7 @@ export async function buildInvoicePdfBuffer(q = {}) {
     const itemsArr = Array.isArray(items) ? items : [];
     for (let i = 0; i < itemsArr.length; i++) {
       // Need space for at least 1 row + totals later
-      if (!ensureSpace(120, y)) { hiddenCount = itemsArr.length - i; break; }
+      if (!ensureSpace(110, y)) { hiddenCount = itemsArr.length - i; break; } // slightly lower reserve than before
 
       const it = itemsArr[i] || {};
       const name = typeof it.name === 'string' ? it.name : String(it.name ?? '');
@@ -263,7 +264,7 @@ export async function buildInvoicePdfBuffer(q = {}) {
     }
 
     // Hidden rows notice
-    if (hiddenCount > 0 && ensureSpace(rowH + 40, y)) {
+    if (hiddenCount > 0 && ensureSpace(rowH + 36, y)) {
       doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
       doc.font('Helvetica-Oblique').fontSize(9).fillColor(gray6)
         .text(`+ ${hiddenCount} more item${hiddenCount > 1 ? 's' : ''} included in totals`,
@@ -272,7 +273,7 @@ export async function buildInvoicePdfBuffer(q = {}) {
     }
 
     // Totals
-    if (ensureSpace(52, y)) {
+    if (ensureSpace(50, y)) {
       doc.moveTo(L, y).lineTo(R, y).strokeColor(line).stroke();
       y += 6;
 
@@ -303,27 +304,32 @@ export async function buildInvoicePdfBuffer(q = {}) {
 
   // Sections
   table('Once-off Charges', q.itemsOnceOff || [], onceSub, onceVat, onceTotal, false);
-  doc.moveDown(0.3);
+  doc.moveDown(0.4);
   table('Monthly Charges',  q.itemsMonthly || [], monSub,  monVat,  monTotal,  true);
 
-  // Pay-now band
-  if (ensureSpace(36)) {
+  // Pay-now band (dynamic height to absorb leftover whitespace)
+  const drawPayNow = () => {
+    if (!ensureSpace(26)) return;
+    // Try to use up most of the remaining space tastefully
+    const remaining = Math.max(26, Math.min(64, spaceLeft() - 8)); // cap growth so it doesn't look silly
     const yBand = doc.y + 2;
-    const bandH = 26;
+    const bandH = remaining; // dynamic
     doc.save().roundedRect(L, yBand, W, bandH, 10).fill(pill).restore();
     doc.roundedRect(L, yBand, W, bandH, 10).strokeColor(line).stroke();
-    doc.font('Helvetica-Bold').fontSize(11).fillColor(ink).text('Pay now (incl VAT)', L + 10, yBand + 6);
-    doc.text(money(grandPayNow), L, yBand + 6, { width: W - 10, align: 'right' });
+    doc.font('Helvetica-Bold').fontSize(11.5).fillColor(ink)
+      .text('Pay now (incl VAT)', L + 10, yBand + 8);
+    doc.font('Helvetica-Bold').fontSize(12).fillColor(ink)
+      .text(money(grandPayNow), L, yBand + 8, { width: W - 10, align: 'right' });
     doc.y = yBand + bandH + 6;
-  }
+  };
+  drawPayNow();
 
-  // Notes (if they fit)
+  // Notes (render only if they fit; if not, the Pay Now band already expanded)
   const notes = [
     'Included: Install & device setup • Remote support • PBX config • Porting assist. Std call-out: R450.',
     q.notes ? `Notes: ${q.notes}` : '',
     `Valid for ${Number(q.validDays ?? 7)} days. Pricing in ZAR.`
   ].filter(Boolean).join('\n');
-
   const notesH = doc.heightOfString(notes, { width: W, align: 'left' });
   if (ensureSpace(notesH + 6)) {
     doc.font('Helvetica').fontSize(9).fillColor(gray6).text(notes, L, doc.y, { width: W });
