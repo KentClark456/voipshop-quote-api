@@ -106,17 +106,16 @@ export async function buildInvoicePdfBuffer(q = {}) {
     .text(`Date: ${datePretty}`,                 L, undefined, { width: W, align: 'right' })
     .text(`Valid: ${Number(q.validDays ?? 7)} days`, L, undefined, { width: W, align: 'right' });
 
-    // --- Banking Details (top-right under header) ---
+// --- Banking Details (top-right under header) ---
 {
-  // Width of the right-hand panel
   const bankBoxW = 260;
   const bankX = R - bankBoxW;
-
-  // Place panel just below the right-aligned header lines
   const bankY = Math.max(doc.y, headerTop + 6);
 
-  // Panel background + border
-  const bankBoxH = 68; // adjust if you add/remove lines
+  // Slightly taller box (or compute dynamically if you prefer)
+  const bankBoxH = 86; // was 68; gives extra breathing room
+
+  // Panel
   doc.save().roundedRect(bankX, bankY, bankBoxW, bankBoxH, 10).fill('#F9FAFB').restore();
   doc.roundedRect(bankX, bankY, bankBoxW, bankBoxH, 10).strokeColor(line).stroke();
 
@@ -124,42 +123,52 @@ export async function buildInvoicePdfBuffer(q = {}) {
   doc.font('Helvetica-Bold').fontSize(9.5).fillColor(ink)
      .text('Banking Details', bankX + 12, bankY + 8, { width: bankBoxW - 24 });
 
-  // Details
+  // Details (stay inside the box)
   doc.font('Helvetica').fontSize(8.5).fillColor(ink);
-  const rowX = bankX + 12, rowW = bankBoxW - 24, rowStartY = bankY + 24;
+  const rowX = bankX + 12, rowW = bankBoxW - 24, rowStartY = bankY + 26;
   doc.text('Umojanet (Pty) Ltd t/a Voipshop', rowX, rowStartY, { width: rowW });
   doc.text('Bank: Capitec Business',          rowX, undefined,  { width: rowW });
   doc.text('Account Number: 2100282464',      rowX, undefined,  { width: rowW });
   doc.text('Branch Code: 470010',             rowX, undefined,  { width: rowW });
-  doc.text('Reference: [Invoice Number]',     rowX, undefined,  { width: rowW });
+  doc.text(`Reference: ${q.invoiceNumber || '[Invoice Number]'}`, rowX, undefined, { width: rowW });
 
-  // Advance document Y so following content clears the panel
-  doc.y = bankY + bankBoxH + 10;
-}
+  // ⚠️ IMPORTANT: do NOT advance doc.y here.
+  // We want left-side content to run in parallel.
+  const rightColumnBottom = bankY + bankBoxH;
 
+  // --- Left column (Company) in parallel with the bank box ---
+  const gutter = 12;
+  const leftW  = W - bankBoxW - gutter;
 
-  // Company block
-  doc.moveDown(1.0);
+  // Start left content aligned with the header area (not pushed down by the panel)
+  const leftStartY = Math.max(doc.y, headerTop + 6);
+  doc.y = leftStartY;
+
   if (q.company?.name) {
     doc.font('Helvetica-Bold').fontSize(11.5).fillColor(ink)
-      .text(q.company.name, L, undefined, { width: W });
+      .text(q.company.name, L, doc.y, { width: leftW });
   }
   doc.font('Helvetica').fontSize(9.5).fillColor(gray6)
-    .text(q.company?.address || '', L, undefined, { width: W })
+    .text(q.company?.address || '', L, undefined, { width: leftW })
     .text(
       `${q.company?.phone || ''}${q.company?.email ? ' • ' + q.company.email : ''}`,
-      L, undefined, { width: W }
+      L, undefined, { width: leftW }
     );
 
-  // Client block
+  // Client block (still left column)
   doc.moveDown(0.6);
-  doc.font('Helvetica-Bold').fontSize(10.5).fillColor(ink).text('Bill To', L, undefined, { width: W });
+  doc.font('Helvetica-Bold').fontSize(10.5).fillColor(ink)
+    .text('Bill To', L, undefined, { width: leftW });
   doc.font('Helvetica').fontSize(9.5).fillColor(ink)
-    .text(q.client?.name || '', L, undefined, { width: W })
-    .text(q.client?.company || '', L, undefined, { width: W })
-    .text(q.client?.email || '', L, undefined, { width: W })
-    .text(q.client?.phone || '', L, undefined, { width: W })
-    .text(q.client?.address || '', L, undefined, { width: W });
+    .text(q.client?.name || '',    L, undefined, { width: leftW })
+    .text(q.client?.company || '', L, undefined, { width: leftW })
+    .text(q.client?.email || '',   L, undefined, { width: leftW })
+    .text(q.client?.phone || '',   L, undefined, { width: leftW })
+    .text(q.client?.address || '', L, undefined, { width: leftW });
+
+  // Now advance below whichever column is taller
+  doc.y = Math.max(doc.y, rightColumnBottom) + 12;
+}
 
   // Totals math
   const vatRate = Number(q.company?.vatRate ?? 0.15);
