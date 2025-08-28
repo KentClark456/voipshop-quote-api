@@ -1,36 +1,45 @@
 // /api/_lib/rateLimit.js
-import { Ratelimit } from '@upstash/ratelimit';
-import { Redis } from '@upstash/redis';
+// Tries to use Upstash if env+deps exist; otherwise falls back to "allow".
+let limiterPromise = null;
 
-// Reuse across routes
-const redis = Redis.fromEnv();
+async function getLimiter() {
+  if (limiterPromise) return limiterPromise;
+  limiterPromise = (async () => {
+    try {
+      const url = process.env.UPSTASH_REDIS_REST_URL;
+      const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+      if (!url || !token) return null;
 
-// Sliding window limiters
-export const perIpMinute = new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(5, '1 m') });
-export const perIpDay    = new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(50, '24 h') });
+      const { Ratelimit } = await import('@upstash/ratelimit');
+      const { Redis } = await import('@upstash/redis'); // Upstash Redis REST SDK
+      const redis = new Redis({ url, token });
 
-export const perEmailHour = new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(3, '1 h') });
-export const perEmailDay  = new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(10, '24 h') });
+      // Tune the window/limit as you like
+      return new Ratelimit({
+        redis,
+        limiter: Ratelimit.slidingWindow(10, '1 m'),
+        prefix: 'voipshop:rl'
+      });
+    } catch (e) {
+      console.warn('[rateLimit] Upstash not available, disabling RL:', e?.message || e);
+      return null;
+    }
+  })();
+  return limiterPromise;
+}
 
-export async function enforceLimits({ ip, action, email }) {
-  const ipKeyM = `rl:${action}:ip:1m:${ip}`;
-  const ipKeyD = `rl:${action}:ip:1d:${ip}`;
-  const emKeyH = `rl:${action}:email:1h:${email}`;
-  const emKeyD = `rl:${action}:email:1d:${email}`;
-
-  const [m, d, eh, ed] = await Promise.all([
-    perIpMinute.limit(ipKeyM),
-    perIpDay.limit(ipKeyD),
-    perEmailHour.limit(emKeyH),
-    perEmailDay.limit(emKeyD),
-  ]);
-
-  // return first violation
-  const hit =
-    (!m.success && { window: '1m', limit: m.limit, remaining: m.remaining }) ||
-    (!d.success && { window: '24h', limit: d.limit, remaining: d.remaining }) ||
-    (!eh.success && { window: '1h/email', limit: eh.limit, remaining: eh.remaining }) ||
-    (!ed.success && { window: '24h/email', limit: ed.limit, remaining: ed.remaining });
-
-  return hit ? { ok: false, hit } : { ok: true };
+export async function enforceLimits({ ip = 'unknown', action = 'generic', email = '' } = {}) {
+  try {
+    const limiter = await getLimiter();
+    if (!limiter) {
+      // No deps/env => allow
+      return { ok: true, hit: { limit: 0, remaining: 0, window: 'disabled' } };
+    }
+    const key = ['rl', action, email || ip].filter(Boolean).join(':');
+    const r = await limiter.limit(key);
+    return { ok: r.success, hit: { limit: r.limit, remaining: r.remaining, window: '1m' } };
+  } catch (e) {
+    console.warn('[rateLimit] error, allowing request:', e?.message || e);
+    return { ok: true, hit: { limit: 0, remaining: 0, window: 'disabled' } };
+  }
 }
