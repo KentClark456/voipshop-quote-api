@@ -316,7 +316,7 @@ const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
   doc.moveDown(0.4);
   table('Monthly Charges',  q.itemsMonthly || [], monSub,  monVat,  monTotal,  true);
 
- // Pay-now band (fixed slim height)
+// Pay-now band (fixed slim height)
 if (ensureSpace(36)) {
   const yBand = doc.y + 2;
   const bandH = 26; // slim height
@@ -327,19 +327,19 @@ if (ensureSpace(36)) {
   doc.font('Helvetica-Bold').fontSize(12).fillColor(ink)
     .text(money(grandPayNow), L, yBand + 8, { width: W - 10, align: 'right' });
   doc.y = yBand + bandH + 6;
-  };
-  drawPayNow();
+}
 
-  // Notes (render only if they fit; if not, the Pay Now band already expanded)
-  const notes = [
-    'Included: Install & device setup • Remote support • PBX config • Porting assist. Std call-out: R450.',
-    q.notes ? `Notes: ${q.notes}` : '',
-    `Valid for ${Number(q.validDays ?? 7)} days. Pricing in ZAR.`
-  ].filter(Boolean).join('\n');
-  const notesH = doc.heightOfString(notes, { width: W, align: 'left' });
-  if (ensureSpace(notesH + 6)) {
-    doc.font('Helvetica').fontSize(9).fillColor(gray6).text(notes, L, doc.y, { width: W });
-  }
+// Notes (render only if they fit)
+const notes = [
+  'Included: Install & device setup • Remote support • PBX config • Porting assist. Std call-out: R450.',
+  q.notes ? `Notes: ${q.notes}` : '',
+  `Valid for ${Number(q.validDays ?? 7)} days. Pricing in ZAR.`
+].filter(Boolean).join('\n');
+
+const notesH = doc.heightOfString(notes, { width: W, align: 'left' });
+if (ensureSpace(notesH + 6)) {
+  doc.font('Helvetica').fontSize(9).fillColor(gray6).text(notes, L, doc.y, { width: W });
+}
 
   // Footer
   const yFooter = doc.page.height - FOOTER_H + 2;

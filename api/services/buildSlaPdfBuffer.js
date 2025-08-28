@@ -233,123 +233,201 @@ drawTwoUpCard('Parties — Details (Fill In)',
   }
 );
 
-  // ---- Services Ordered — derive + compact pricing table
-  const deriveServices = () => {
-    if (Array.isArray(services) && services.length) return services;
-    if (!Array.isArray(itemsMonthly) || !itemsMonthly.length) return [];
-    const globMin = Number(minutesIncluded || 0);
-    return itemsMonthly.map(it => {
-      const name = String(it?.name || '');
-      const looksLikeCalls = /call|min(ute)?s?/i.test(name);
-      const mins = Number(
-        it?.minutes ?? it?.minutesIncluded ?? it?.includedMinutes ?? 0
-      ) || (looksLikeCalls ? globMin : 0);
-      const unitPrice = Number(it?.unit);
-      const qtyBase   = looksLikeCalls ? (mins || 0) : Number(it?.qty || 1);
-      const qty       = Number.isFinite(qtyBase) && qtyBase > 0 ? qtyBase : 1;
+// ---- Services Ordered — derive + compact pricing table
+const deriveServices = () => {
+  // If services passed in, normalize key names but keep values
+  if (Array.isArray(services) && services.length) {
+    return services.map(s => {
+      const name = String(s?.name || '');
+      const looksLikeCalls = /call|min(ute)?s?|bundle/i.test(name);
+
+      const unitRaw =
+        s.unit ??
+        s.unitPrice ??
+        s.unit_price ??
+        s.price ??
+        (s.pricing && (s.pricing.unit || s.pricing.price));
+
+      const qtyRaw =
+        s.qty ??
+        s.quantity ??
+        s.count ??
+        1;
+
+      const minutesRaw =
+        s.minutes ??
+        s.minutesIncluded ??
+        s.includedMinutes ??
+        s.qtyMinutes ??
+        0;
+
+      const minutes = Number(minutesRaw) || 0;
+
       return {
         name,
-        qty,
-        unitPrice: Number.isFinite(unitPrice) ? unitPrice : 0,
-        note: looksLikeCalls && mins ? `Includes ${mins} minutes` : ''
+        qty: looksLikeCalls ? minutes : (Number(qtyRaw) > 0 ? Number(qtyRaw) : 1),
+        unitPrice: Number(unitRaw) || 0,
+        minutes,
+        looksLikeCalls,
+        note: looksLikeCalls && minutes ? `Includes ${minutes} minutes` : (s.note || '')
       };
     });
-  };
-  const svc = deriveServices();
+  }
 
-  // Card: Services Ordered (Monthly)
-  drawCard('Services Ordered (Monthly)', ({ x, w }) => {
-    // Column widths: Description, Qty, Unit Price, Line Total
-    const cW = [ w * 0.52, w * 0.12, w * 0.16, w * 0.20 ];
-    const rx = [ x, x + cW[0], x + cW[0] + cW[1], x + cW[0] + cW[1] + cW[2] ];
+  // Else derive from checkout itemsMonthly
+  if (!Array.isArray(itemsMonthly) || !itemsMonthly.length) return [];
 
-    // Header row (tight)
-    doc.font('Helvetica-Bold').fontSize(8.2).fillColor(INK);
-    doc.text('Description', rx[0], y, { width: cW[0] });
-    doc.text('Qty',         rx[1], y, { width: cW[1], align: 'right' });
-    doc.text('Unit Price',  rx[2], y, { width: cW[2], align: 'right' });
-    doc.text('Line Total',  rx[3], y, { width: cW[3], align: 'right' });
-    moveY(8);
-    doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#D1D5DB').lineWidth(1).stroke();
-    moveY(4);
+  const globMin = Number(minutesIncluded || 0);
 
-    if (!svc.length) {
-      doc.font('Helvetica').fontSize(7.8).fillColor(MUTED)
-         .text('No monthly service lines were supplied. (Pass `services` OR `itemsMonthly` + `minutesIncluded`.)', x, y, { width: w });
-      moveY(10);
-      return;
-    }
+  return itemsMonthly.map(it => {
+    const name = String(it?.name || '');
+    const looksLikeCalls = /call|min(ute)?s?|bundle/i.test(name);
 
-    // Dynamically cap rows so Debit Mandate always fits later
-    const rowH = 10;                  // tighter row height
-    const DEBIT_MIN  = 140;           // reserved height for Debit card (matches actual minHeight)
-    const INITIALS   = 24;            // initials line at bottom of page
-    const FUDGE_HDR  = 30;            // table totals etc
-    const reservedBelow = DEBIT_MIN + INITIALS + 20;
+    const unitRaw =
+      it.unit ??
+      it.unitPrice ??
+      it.unit_price ??
+      it.price ??
+      (it.pricing && (it.pricing.unit || it.pricing.price));
 
-    const roomForRows = (pageBottom() - FOOTER_H - reservedBelow) - y - FUDGE_HDR;
-    let maxRows = Math.max(0, Math.floor(roomForRows / rowH));
+    const qtyRaw =
+      it.qty ??
+      it.quantity ??
+      it.count ??
+      1;
 
-    doc.font('Helvetica').fontSize(7.8).fillColor(MUTED);
-    let subtotal = 0;
-    let rendered = 0;
+    const minutesRaw =
+      it.minutes ??
+      it.minutesIncluded ??
+      it.includedMinutes ??
+      it.qtyMinutes ??
+      0;
 
-    for (let i = 0; i < svc.length && rendered < maxRows; i++) {
-      const it = svc[i];
-      const lineTotal = (Number(it.unitPrice) || 0) * (Number(it.qty) || 0);
-      subtotal += Number.isFinite(lineTotal) ? lineTotal : 0;
+    const minutes = Number(minutesRaw) || (looksLikeCalls ? globMin : 0);
 
-      doc.text(it.name || '',         rx[0], y, { width: cW[0] });
-      doc.text(String(it.qty || 0),   rx[1], y, { width: cW[1], align: 'right' });
-      doc.text(it.unitPrice > 0 ? money(it.unitPrice) : '—', rx[2], y, { width: cW[2], align: 'right' });
-      doc.text(money(lineTotal),      rx[3], y, { width: cW[3], align: 'right' });
-      moveY(rowH);
-
-      if (it.note) {
-        const noteH = doc.heightOfString(it.note, { width: cW[0], lineGap: 0.1 });
-        doc.font('Helvetica-Oblique').fillColor(MUTED)
-           .text(it.note, rx[0], y - 1, { width: cW[0], lineGap: 0.1 });
-        doc.font('Helvetica').fillColor(MUTED);
-        moveY(Math.min(6, noteH));  // very tight note height
-      }
-      rendered++;
-    }
-
-    const remaining = Math.max(0, svc.length - rendered);
-    if (remaining > 0) {
-      doc.font('Helvetica-Oblique').fontSize(7.8).fillColor(MUTED)
-         .text(`+${remaining} more item(s) included in totals`, x, y, { width: w });
-      moveY(8);
-      doc.font('Helvetica').fontSize(7.8).fillColor(MUTED);
-    }
-
-    // Totals (monthly) — reduced padding
-    const vat = subtotal * Number(vatRate || 0);
-    const total = subtotal + vat;
-
-    moveY(2);
-    doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#E5E7EB').lineWidth(1).stroke();
-    moveY(3);
-
-    const labelW = 112;
-    const valW   = 104;
-    const valX   = x + w - valW;
-    const labX   = valX - labelW - 6;
-
-    const line = (label, val, bold=false) => {
-      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica')
-         .fontSize(bold ? 8.4 : 8)
-         .fillColor(bold ? INK : MUTED)
-         .text(label, labX, y, { width: labelW, align: 'right' });
-      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(INK)
-         .text(money(val), valX, y, { width: valW, align: 'right' });
-      moveY(bold ? 9 : 8);
+    return {
+      name,
+      qty: looksLikeCalls ? (Number(minutes) || 0) : (Number(qtyRaw) > 0 ? Number(qtyRaw) : 1),
+      unitPrice: Number(unitRaw) || 0,
+      minutes,
+      looksLikeCalls,
+      note: looksLikeCalls && minutes ? `Includes ${minutes} minutes` : ''
     };
+  });
+};
+const svc = deriveServices();
 
-    line('Monthly Subtotal (ex VAT)', subtotal);
-    line(`VAT (${Math.round(Number(vatRate||0)*100)}%)`, vat);
-    line('Monthly Total (incl VAT)', total, true);
-  }, { minHeight: 96 });
+// Card: Services Ordered (Monthly)
+drawCard('Services Ordered (Monthly)', ({ x, w }) => {
+  // Column widths: Description, Qty, Unit Price, Line Total
+  const cW = [ w * 0.52, w * 0.12, w * 0.16, w * 0.20 ];
+  const rx = [ x, x + cW[0], x + cW[0] + cW[1], x + cW[0] + cW[1] + cW[2] ];
+
+  // Header row (tight)
+  doc.font('Helvetica-Bold').fontSize(8.2).fillColor(INK);
+  doc.text('Description', rx[0], y, { width: cW[0] });
+  doc.text('Qty',         rx[1], y, { width: cW[1], align: 'right' });
+  doc.text('Unit Price',  rx[2], y, { width: cW[2], align: 'right' });
+  doc.text('Line Total',  rx[3], y, { width: cW[3], align: 'right' });
+  moveY(8);
+  doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#D1D5DB').lineWidth(1).stroke();
+  moveY(4);
+
+  if (!svc.length) {
+    doc.font('Helvetica').fontSize(7.8).fillColor(MUTED)
+       .text('No monthly service lines were supplied. (Pass `services` OR `itemsMonthly` + `minutesIncluded`.)', x, y, { width: w });
+    moveY(10);
+    return;
+  }
+
+  // Dynamically cap rows so Debit Mandate always fits later
+  const rowH = 10;
+  const DEBIT_MIN  = 140;
+  const INITIALS   = 24;
+  const FUDGE_HDR  = 30;
+  const reservedBelow = DEBIT_MIN + INITIALS + 20;
+
+  const roomForRows = (pageBottom() - FOOTER_H - reservedBelow) - y - FUDGE_HDR;
+  let maxRows = Math.max(0, Math.floor(roomForRows / rowH));
+
+  doc.font('Helvetica').fontSize(7.8).fillColor(MUTED);
+  let subtotal = 0;
+  let rendered = 0;
+
+  for (let i = 0; i < svc.length && rendered < maxRows; i++) {
+    const it = svc[i];
+
+    // Bundle-aware line total
+    const unit = Number(it.unitPrice) || 0;
+    const qtyShown = Number(it.qty) || 0;
+    let lineTotal = 0;
+
+    if (it.looksLikeCalls && (Number(it.minutes) > 0)) {
+      const bundleSize =
+        Number(it.bundleSize) ||
+        Number((q?.meta && q.meta.bundleSize)) ||
+        250; // default bundle size
+      const bundles = bundleSize > 0 ? (Number(it.minutes) / bundleSize) : 0;
+      lineTotal = unit * bundles;
+    } else {
+      lineTotal = unit * (qtyShown || 1);
+    }
+
+    subtotal += Number.isFinite(lineTotal) ? lineTotal : 0;
+
+    // Render row
+    doc.text(it.name || '',         rx[0], y, { width: cW[0] });
+    doc.text(String(qtyShown || 0), rx[1], y, { width: cW[1], align: 'right' });
+    doc.text(unit > 0 ? money(unit) : '—', rx[2], y, { width: cW[2], align: 'right' });
+    doc.text(money(lineTotal),      rx[3], y, { width: cW[3], align: 'right' });
+    moveY(rowH);
+
+    if (it.note) {
+      const noteH = doc.heightOfString(it.note, { width: cW[0], lineGap: 0.1 });
+      doc.font('Helvetica-Oblique').fillColor(MUTED)
+         .text(it.note, rx[0], y - 1, { width: cW[0], lineGap: 0.1 });
+      doc.font('Helvetica').fillColor(MUTED);
+      moveY(Math.min(6, noteH));
+    }
+    rendered++;
+  }
+
+  const remaining = Math.max(0, svc.length - rendered);
+  if (remaining > 0) {
+    doc.font('Helvetica-Oblique').fontSize(7.8).fillColor(MUTED)
+       .text(`+${remaining} more item(s) included in totals`, x, y, { width: w });
+    moveY(8);
+    doc.font('Helvetica').fontSize(7.8).fillColor(MUTED);
+  }
+
+  // Totals (monthly)
+  const vat = subtotal * Number(vatRate || 0);
+  const total = subtotal + vat;
+
+  moveY(2);
+  doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#E5E7EB').lineWidth(1).stroke();
+  moveY(3);
+
+  const labelW = 112;
+  const valW   = 104;
+  const valX   = x + w - valW;
+  const labX   = valX - labelW - 6;
+
+  const line = (label, val, bold=false) => {
+    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica')
+       .fontSize(bold ? 8.4 : 8)
+       .fillColor(bold ? INK : MUTED)
+       .text(label, labX, y, { width: labelW, align: 'right' });
+    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(INK)
+       .text(money(val), valX, y, { width: valW, align: 'right' });
+    moveY(bold ? 9 : 8);
+  };
+
+  line('Monthly Subtotal (ex VAT)', subtotal);
+  line(`VAT (${Math.round(Number(vatRate||0)*100)}%)`, vat);
+  line('Monthly Total (incl VAT)', total, true);
+}, { minHeight: 96 });
+
 
 // ---- Debit Order Mandate (signature inside; initials AFTER card)
 drawCard('Debit Order Mandate (Fill In)', (box) => {
