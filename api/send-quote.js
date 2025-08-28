@@ -1,24 +1,10 @@
 // /api/send-quote.js
 export const config = { runtime: 'nodejs' };
 
-import { Resend } from 'resend';
-import { put } from '@vercel/blob';
-import { buildQuotePdfBuffer } from './services/buildQuotePdfBuffer.js';
-import { verifyRecaptcha } from './_lib/verifyRecaptcha.js';
-import { enforceLimits } from './_lib/rateLimit.js';
-
-const resend = new Resend(process.env.RESEND_API_KEY);
+// Keep simple constants/utilities at top-level (safe for preflight)
 const COMPLETE_ORDER_URL = process.env.COMPLETE_ORDER_URL || 'https://voipshop.co.za/complete-order';
 
-// ---- reCAPTCHA envs (support both names to avoid mismatches) ----
-const RECAPTCHA_SECRET =
-  process.env.RECAPTCHA_V3_SECRET_KEY ||
-  process.env.RECAPTCHA_SECRET_KEY ||
-  process.env.RECAPTCHA_SECRET || '';
-
-const RECAPTCHA_MIN_SCORE = Number(process.env.RECAPTCHA_MIN_SCORE || 0.5);
-
-// ===== COMPANY DEFAULTS (unchanged) =====
+/* ===== COMPANY DEFAULTS (unchanged) ===== */
 const COMPANY_DEFAULTS = {
   name: 'VoIP Shop',
   address: '23 Lombardy Road, Broadacres, Johannesburg',
@@ -144,11 +130,11 @@ function emailBodyAttachmentDelivery({ brand, clientName, monthlyInclVat }) {
 }
 
 export default async function handler(req, res) {
-  // --- CORS (simple) ---
+  // --- CORS: respond BEFORE any heavy imports to prevent preflight 500s ---
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method === 'OPTIONS') return res.status(204).end();
 
   // Flags
   const explicitPreview =
@@ -163,72 +149,79 @@ export default async function handler(req, res) {
   const base = withDefaults({ ...body, compact: compactFlag });
 
   try {
-    // ✅ reCAPTCHA v3: only for POST (email flows)
-    if (isPost) {
-      if (!RECAPTCHA_SECRET) {
-        return res.status(500).json({ error: 'Server misconfigured: missing reCAPTCHA secret env' });
-      }
-
-      const token = body?.recaptchaToken;
-      const action = (body?.recaptchaAction || 'send_quote').trim();
-      const remoteIp =
-        (req.headers['x-forwarded-for'] || '').split(',')[0]?.trim() ||
-        req.socket?.remoteAddress;
-
-      const check = await verifyRecaptcha({
-        token,
-        actionExpected: action,            // we expect the same action we asked client to execute
-        secret: RECAPTCHA_SECRET,
-        remoteIp,
-        minScore: RECAPTCHA_MIN_SCORE
-      });
-
-      if (!check?.ok) {
-        return res.status(400).json({
-          error: 'reCAPTCHA rejected',
-          reason: check?.reason || 'unknown',
-          meta: check?.data
-            ? { action: check.data.action, score: check.data.score, hostname: check.data.hostname }
-            : undefined
-        });
-      }
-
-      // 🔒 Rate limit (after captcha, before heavy work)
-      const ip = remoteIp || 'unknown';
-      const emailForRl = base?.client?.email || '';
-      const rl = await enforceLimits({
-        ip,
-        action: action || 'send_quote',
-        email: emailForRl
-      });
-      if (!rl.ok) {
-        return res.status(429).json({
-          error: 'Too many requests',
-          retry_window: rl.hit.window,
-          limit: rl.hit.limit,
-          remaining: rl.hit.remaining
-        });
-      }
-    }
-
-    // Build PDF buffer via service
-    const pdfBuffer = await buildQuotePdfBuffer(base);
-
-    // Preview vs Email
-    const noEmail = !base?.client?.email;
-    const isPreview = explicitPreview || req.method === 'GET' || noEmail;
-
-    if (isPreview) {
+    // --- If GET / preview / no client email: just build and return PDF inline
+    if (!isPost || !base?.client?.email || explicitPreview) {
+      const { buildQuotePdfBuffer } = await import('./services/buildQuotePdfBuffer.js');
+      const pdfBuffer = await buildQuotePdfBuffer(base);
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `inline; filename=Quote-${base.quoteNumber}.pdf`);
       return res.status(200).send(pdfBuffer);
     }
 
-    // Email flow
+    // --- POST: reCAPTCHA v3 verification (first)
+    const RECAPTCHA_SECRET =
+      process.env.RECAPTCHA_V3_SECRET_KEY ||
+      process.env.RECAPTCHA_SECRET_KEY ||
+      process.env.RECAPTCHA_SECRET || '';
+
+    const RECAPTCHA_MIN_SCORE = Number(process.env.RECAPTCHA_MIN_SCORE || 0.5);
+
+    if (!RECAPTCHA_SECRET) {
+      return res.status(500).json({ error: 'Server misconfigured: missing reCAPTCHA secret env' });
+    }
+
+    const { verifyRecaptcha } = await import('./_lib/verifyRecaptcha.js');
+    const token = body?.recaptchaToken;
+    const action = (body?.recaptchaAction || 'send_quote').trim();
+    const remoteIp =
+      (req.headers['x-forwarded-for'] || '').split(',')[0]?.trim() ||
+      req.socket?.remoteAddress;
+
+    const check = await verifyRecaptcha({
+      token,
+      actionExpected: action,
+      secret: RECAPTCHA_SECRET,
+      remoteIp,
+      minScore: RECAPTCHA_MIN_SCORE
+    });
+
+    if (!check?.ok) {
+      return res.status(400).json({
+        error: 'reCAPTCHA rejected',
+        reason: check?.reason || 'unknown',
+        meta: check?.data
+          ? { action: check.data.action, score: check.data.score, hostname: check.data.hostname }
+          : undefined
+      });
+    }
+
+    // --- Rate limit (after captcha, before heavy work)
+    const { enforceLimits } = await import('./_lib/rateLimit.js');
+    const rl = await enforceLimits({
+      ip: remoteIp || 'unknown',
+      action: action || 'send_quote',
+      email: base?.client?.email || ''
+    });
+    if (!rl.ok) {
+      return res.status(429).json({
+        error: 'Too many requests',
+        retry_window: rl.hit.window,
+        limit: rl.hit.limit,
+        remaining: rl.hit.remaining
+      });
+    }
+
+    // --- Build PDF (heavy) AFTER captcha + RL pass
+    const { buildQuotePdfBuffer } = await import('./services/buildQuotePdfBuffer.js');
+    const pdfBuffer = await buildQuotePdfBuffer(base);
+
+    // --- Email (Resend)
     if (!process.env.RESEND_API_KEY) {
       console.error('[send-quote] Missing RESEND_API_KEY env var');
       return res.status(500).send('Server not configured (email).');
     }
+    const { Resend } = await import('resend');
+    const resend = new Resend(process.env.RESEND_API_KEY);
 
     const delivery =
       (String(body.delivery || '')).toLowerCase() ||
@@ -244,7 +237,7 @@ export default async function handler(req, res) {
         console.error('[send-quote] Missing BLOB_READ_WRITE_TOKEN for link delivery');
         return res.status(500).send('BLOB_READ_WRITE_TOKEN not set for link delivery.');
       }
-
+      const { put } = await import('@vercel/blob');
       const keyPart = String(base.quoteNumber).replace(/[^\w\-]+/g, '-');
       const objectPath = `quotes/${new Date().toISOString().slice(0,10)}/quote-${keyPart}.pdf`;
 
