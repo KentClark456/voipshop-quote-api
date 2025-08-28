@@ -1,5 +1,10 @@
 // /api/send-quote.js
 export const config = { runtime: 'nodejs' };
+// send-quote.js (top)
+const RECAPTCHA_SECRET =
+  process.env.RECAPTCHA_V3_SECRET_KEY ||
+  process.env.RECAPTCHA_SECRET_KEY ||
+  process.env.RECAPTCHA_SECRET || '';
 
 // Keep simple constants/utilities at top-level (safe for preflight)
 const COMPLETE_ORDER_URL = process.env.COMPLETE_ORDER_URL || 'https://voipshop.co.za/complete-order';
