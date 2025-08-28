@@ -1,5 +1,6 @@
 // /api/complete-order.js
 import { Resend } from 'resend';
+import { enforceLimits } from './_lib/rateLimit.js';
 
 // --- Force Node runtime (NOT Edge) ---
 export const config = { runtime: 'nodejs' };
@@ -44,7 +45,6 @@ async function verifyRecaptchaV3({ token, action, remoteIp }) {
   const data = await resp.json().catch(() => ({}));
 
   if (!data?.success) return { ok: false, reason: 'verification_failed', data };
-  // If client sent an action, enforce it (prevents token reuse across flows)
   if (action && data.action && data.action !== action) {
     return { ok: false, reason: 'action_mismatch', data };
   }
@@ -108,7 +108,20 @@ export default async function handler(req, res) {
       });
     }
 
-    // ---------- Lazy-load heavy modules AFTER captcha passes ----------
+    // ---------- Rate limit (after captcha, before heavy work) ----------
+    const ip = remoteIp || 'unknown';
+    const emailForRl = customer?.email || '';
+    const rl = await enforceLimits({ ip, action: recaptchaAction || 'complete_order_bundle', email: emailForRl });
+    if (!rl.ok) {
+      return res.status(429).json({
+        error: 'Too many requests',
+        retry_window: rl.hit.window,
+        limit: rl.hit.limit,
+        remaining: rl.hit.remaining
+      });
+    }
+
+    // ---------- Lazy-load heavy modules AFTER captcha + RL pass ----------
     const [
       { buildInvoicePdfBuffer },
       { buildSlaPdfBuffer },
@@ -219,66 +232,66 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Failed to build one of the PDFs: ' + (e.message || String(e)) });
     }
 
-// ---------- Compose and send email ----------
-const html = `
-  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial;color:#111;max-width:600px;margin:0 auto;padding:24px;">
-    <div style="text-align:center;margin-bottom:16px;">
-      ${COMPANY.logoUrl ? `<img src="${COMPANY.logoUrl}" alt="${COMPANY.name}" style="height:36px;">` : ''}
-    </div>
+    // ---------- Compose email HTML ----------
+    const html = `
+      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial;color:#111;max-width:600px;margin:0 auto;padding:24px;">
+        <div style="text-align:center;margin-bottom:16px;">
+          ${COMPANY.logoUrl ? `<img src="${COMPANY.logoUrl}" alt="${COMPANY.name}" style="height:36px;">` : ''}
+        </div>
 
-    <h2 style="margin:0 0 8px 0;font-size:18px;">Thank you for your order ${ordNumber}</h2>
-    <p style="margin:8px 0 16px 0;">Hi ${invoicePayload.client.name || 'there'},</p>
+        <h2 style="margin:0 0 8px 0;font-size:18px;">Thank you for your order ${ordNumber}</h2>
+        <p style="margin:8px 0 16px 0;">Hi ${invoicePayload.client.name || 'there'},</p>
 
-    <p style="margin:0 0 12px 0;">
-      Thanks for choosing <strong>${COMPANY.name}</strong>. Please see attached:
-    </p>
-    <ul style="margin:0 0 16px 20px; padding:0;">
-      <li>Invoice <strong>${invNumber}</strong></li>
-      <li>Service Level Agreement (SLA)</li>
-      <li>Porting Letter of Authority (LOA)</li>
-    </ul>
+        <p style="margin:0 0 12px 0;">
+          Thanks for choosing <strong>${COMPANY.name}</strong>. Please see attached:
+        </p>
+        <ul style="margin:0 0 16px 20px; padding:0;">
+          <li>Invoice <strong>${invNumber}</strong></li>
+          <li>Service Level Agreement (SLA)</li>
+          <li>Porting Letter of Authority (LOA)</li>
+        </ul>
 
-    <p style="margin:0 0 12px 0;">
-      To proceed with number porting, please <strong>sign the LOA</strong> and return it together with:
-    </p>
-    <ul style="margin:0 0 16px 20px; padding:0;">
-      <li>Your latest telephone account</li>
-      <li>Your company letterhead</li>
-      <li>A copy of the account holder’s ID</li>
-    </ul>
+        <p style="margin:0 0 12px 0;">
+          To proceed with number porting, please <strong>sign the LOA</strong> and return it together with:
+        </p>
+        <ul style="margin:0 0 16px 20px; padding:0;">
+          <li>Your latest telephone account</li>
+          <li>Your company letterhead</li>
+          <li>A copy of the account holder’s ID</li>
+        </ul>
 
-    <p style="margin:0 0 12px 0;">
-      You can email the documents to <a href="mailto:sales@voipshop.co.za">sales@voipshop.co.za</a>
-      or upload them via the <strong>Completed Order</strong> section on our website.
-    </p>
+        <p style="margin:0 0 12px 0;">
+          You can email the documents to <a href="mailto:sales@voipshop.co.za">sales@voipshop.co.za</a>
+          or upload them via the <strong>Completed Order</strong> section on our website.
+        </p>
 
-    <p style="margin:0 0 12px 0;">
-      A support agent will contact you shortly to confirm your order and to schedule an installation time.
-      Please note: installation will be scheduled once the invoice is paid.
-    </p>
+        <p style="margin:0 0 12px 0;">
+          A support agent will contact you shortly to confirm your order and to schedule an installation time.
+          Please note: installation will be scheduled once the invoice is paid.
+        </p>
 
-    <hr style="border:none;border-top:1px solid #e5e7eb;margin:16px 0;" />
+        <hr style="border:none;border-top:1px solid #e5e7eb;margin:16px 0;" />
 
-    <p style="margin:0 0 4px 0;"><strong>${COMPANY.name}</strong></p>
-    <p style="margin:0 0 2px 0;">${COMPANY.address}</p>
-    <p style="margin:0 0 2px 0;">${COMPANY.phone} • <a href="mailto:${COMPANY.email}">${COMPANY.email}</a></p>
-    ${COMPANY.website ? `<p style="margin:0;"><a href="${COMPANY.website}">${COMPANY.website}</a></p>` : ''}
-  </div>`;
+        <p style="margin:0 0 4px 0;"><strong>${COMPANY.name}</strong></p>
+        <p style="margin:0 0 2px 0;">${COMPANY.address}</p>
+        <p style="margin:0 0 2px 0;">${COMPANY.phone} • <a href="mailto:${COMPANY.email}">${COMPANY.email}</a></p>
+        ${COMPANY.website ? `<p style="margin:0;"><a href="${COMPANY.website}">${COMPANY.website}</a></p>` : ''}
+      </div>`;
 
-const { error, data } = await resend.emails.send({
-  from: 'sales@voipshop.co.za', // must be verified in Resend
-  to: invoicePayload.client.email,
-  cc: ['sales@voipshop.co.za'], // ✅ always CC sales
-  reply_to: 'sales@voipshop.co.za',
-  subject: `Order ${ordNumber} • Invoice, SLA & Porting • VoIP Shop`,
-  html,
-  attachments: [
-    { filename: `Invoice-${invNumber}.pdf`,                  content: invoicePdf,  contentType: 'application/pdf' },
-    { filename: `Service-Level-Agreement.pdf`,               content: slaPdf,      contentType: 'application/pdf' },
-    { filename: `Porting-Letter-of-Authority.pdf`,           content: portingPdf,  contentType: 'application/pdf' }
-  ]
-});
-
+    // ---------- Send email ----------
+    const { error, data } = await resend.emails.send({
+      from: 'sales@voipshop.co.za', // must be verified in Resend
+      to: invoicePayload.client.email,
+      cc: ['sales@voipshop.co.za'], // ✅ always CC sales
+      reply_to: 'sales@voipshop.co.za',
+      subject: `Order ${ordNumber} • Invoice, SLA & Porting • VoIP Shop`,
+      html,
+      attachments: [
+        { filename: `Invoice-${invNumber}.pdf`,        content: invoicePdf.toString('base64'), contentType: 'application/pdf' },
+        { filename: `Service-Level-Agreement.pdf`,     content: slaPdf.toString('base64'),     contentType: 'application/pdf' },
+        { filename: `Porting-Letter-of-Authority.pdf`, content: portingPdf.toString('base64'), contentType: 'application/pdf' }
+      ]
+    });
 
     if (error) {
       console.error('[complete-order] Resend error:', error);

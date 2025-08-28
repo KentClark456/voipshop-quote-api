@@ -2,6 +2,7 @@
 export const config = { runtime: 'nodejs' };
 
 import { verifyRecaptcha } from './_lib/verifyRecaptcha.js';
+import { enforceLimits } from './_lib/rateLimit.js';
 import { buildSlaPdfBuffer } from './services/buildSlaPdfBuffer.js';
 
 export default async function handler(req, res) {
@@ -18,9 +19,9 @@ export default async function handler(req, res) {
   try {
     const checkout = req.body || {};
 
-    // ---- reCAPTCHA v3 (expect action: "complete_order_sla") ----
+    // ---- reCAPTCHA v3 (expect action: "complete_order_sla" or "send_sla") ----
     const token = checkout?.recaptchaToken;
-    const action = checkout?.recaptchaAction; // e.g. 'complete_order_sla'
+    const action = checkout?.recaptchaAction || 'send_sla';
     const secret = process.env.RECAPTCHA_SECRET;
     const remoteIp =
       (req.headers['x-forwarded-for'] || '').split(',')[0]?.trim() ||
@@ -42,12 +43,25 @@ export default async function handler(req, res) {
       });
     }
 
+    // ---- Rate limit (after captcha, before heavy work) ----
+    const ip = remoteIp || 'unknown';
+    const emailForRl = checkout?.customer?.email || '';
+    const rl = await enforceLimits({ ip, action, email: emailForRl });
+    if (!rl.ok) {
+      return res.status(429).json({
+        error: 'Too many requests',
+        retry_window: rl.hit.window,
+        limit: rl.hit.limit,
+        remaining: rl.hit.remaining
+      });
+    }
+
     // ---- Build SLA payload (same logic you had) ----
     const services = [
-      { name: 'Cloud PBX',                 qty: Number(checkout?.monthly?.cloudPbxQty ?? 1) },
-      { name: 'Extensions',                qty: Number(checkout?.monthly?.extensions ?? 3) },
-      { name: 'Geographic Number (DID)',   qty: Number(checkout?.monthly?.didQty ?? 1) },
-      { name: 'Voice Minutes (bundle)',    qty: Number(checkout?.monthly?.minutes ?? 250), unit: 'min' }
+      { name: 'Cloud PBX',               qty: Number(checkout?.monthly?.cloudPbxQty ?? 1) },
+      { name: 'Extensions',              qty: Number(checkout?.monthly?.extensions ?? 3) },
+      { name: 'Geographic Number (DID)', qty: Number(checkout?.monthly?.didQty ?? 1) },
+      { name: 'Voice Minutes (bundle)',  qty: Number(checkout?.monthly?.minutes ?? 250), unit: 'min' }
     ];
 
     const debitOrder = {

@@ -5,8 +5,10 @@ import { Resend } from 'resend';
 import { put } from '@vercel/blob';
 import { buildQuotePdfBuffer } from './services/buildQuotePdfBuffer.js';
 import { verifyRecaptcha } from './_lib/verifyRecaptcha.js';
+import { enforceLimits } from './_lib/rateLimit.js';
 
 const resend = new Resend(process.env.RESEND_API_KEY);
+const COMPLETE_ORDER_URL = process.env.COMPLETE_ORDER_URL || 'https://voipshop.co.za/complete-order';
 
 /* ===== COMPANY DEFAULTS (unchanged) ===== */
 const COMPANY_DEFAULTS = {
@@ -67,38 +69,69 @@ function escapeHtml(s = '') {
   return String(s).replace(/[&<>"']/g, (m) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
 }
 
-function emailBodyWithLink({ brand, clientName, monthlyInclVat, pdfUrl }) {
-  const pre = `Your VoIP Shop quote is ready — monthly est. ${money(monthlyInclVat)}`;
+/** Primary CTA email (when delivery=link) — includes subtle download link */
+function emailBodyLinkDelivery({ brand, clientName, monthlyInclVat, pdfUrl }) {
+  const pre = `Thanks for requesting a quote — monthly est. ${money(monthlyInclVat)}`;
   return `
   <div style="display:none;overflow:hidden;line-height:1px;opacity:0;max-height:0;max-width:0;">${escapeHtml(pre)}</div>
-  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial;color:#111;max-width:560px;margin:0 auto;padding:24px;">
+  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial;color:#111;max-width:600px;margin:0 auto;padding:24px;">
     <div style="text-align:center;margin-bottom:16px;">
       ${brand.logoUrl ? `<img src="${brand.logoUrl}" alt="${escapeHtml(brand.name)}" style="height:36px;">` : ''}
     </div>
-    <p>Hi ${escapeHtml(clientName || '')},</p>
-    <p>Your quote is ready. Your estimated <strong>monthly bill is ${money(monthlyInclVat)}</strong>.</p>
-    <p style="text-align:center;margin:24px 0;">
-      <a href="${pdfUrl}" style="background:#111;color:#fff;padding:12px 18px;border-radius:10px;text-decoration:none;display:inline-block;">
-        Download Quote (PDF)
+
+    <h2 style="margin:0 0 8px 0;font-size:18px;">Thank you for requesting a quote</h2>
+    <p style="margin:8px 0 12px 0;">Hi ${escapeHtml(clientName || '')},</p>
+
+    <p style="margin:0 0 12px 0;">
+      We’ve prepared your quote. Your estimated <strong>monthly bill is ${money(monthlyInclVat)}</strong>.
+      If you have any questions, call us on <strong>${escapeHtml(brand.phone || '')}</strong> or reply to this email.
+    </p>
+
+    <p style="text-align:center;margin:20px 0;">
+      <a href="${COMPLETE_ORDER_URL}" style="background:#111;color:#fff;padding:12px 18px;border-radius:10px;text-decoration:none;display:inline-block;">
+        Complete Your Order
       </a>
     </p>
-    <p>Just reply if you have any questions.</p>
-    <p>— ${escapeHtml(brand.name)} Team</p>
+
+    <p style="margin:12px 0 0 0;font-size:14px;">
+      Prefer to save the quote? <a href="${pdfUrl}">Download your Quote (PDF)</a>
+    </p>
+
+    <hr style="border:none;border-top:1px solid #e5e7eb;margin:16px 0;" />
+    <p style="margin:0 0 4px 0;"><strong>${escapeHtml(brand.name)}</strong></p>
+    <p style="margin:0 0 2px 0;">${escapeHtml(brand.address || '')}</p>
+    <p style="margin:0 0 2px 0;">${escapeHtml(brand.phone || '')} • <a href="mailto:${escapeHtml(brand.email || '')}">${escapeHtml(brand.email || '')}</a></p>
   </div>`;
 }
 
-function emailBodyTiny({ brand, clientName, monthlyInclVat }) {
-  const pre = `Your VoIP Shop quote is ready — monthly est. ${money(monthlyInclVat)}`;
+/** Attachment delivery — same structure, no download link (PDF is attached) */
+function emailBodyAttachmentDelivery({ brand, clientName, monthlyInclVat }) {
+  const pre = `Thanks for requesting a quote — monthly est. ${money(monthlyInclVat)}`;
   return `
   <div style="display:none;overflow:hidden;line-height:1px;opacity:0;max-height:0;max-width:0;">${escapeHtml(pre)}</div>
-  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial;color:#111;max-width:560px;margin:0 auto;padding:24px;">
+  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial;color:#111;max-width:600px;margin:0 auto;padding:24px;">
     <div style="text-align:center;margin-bottom:16px;">
       ${brand.logoUrl ? `<img src="${brand.logoUrl}" alt="${escapeHtml(brand.name)}" style="height:36px;">` : ''}
     </div>
-    <p>Hi ${escapeHtml(clientName || '')},</p>
-    <p>Your quote is ready. Your estimated <strong>monthly bill is ${money(monthlyInclVat)}</strong>.</p>
-    <p>The PDF is attached for your records.</p>
-    <p>— ${escapeHtml(brand.name)} Team</p>
+
+    <h2 style="margin:0 0 8px 0;font-size:18px;">Thank you for requesting a quote</h2>
+    <p style="margin:8px 0 12px 0;">Hi ${escapeHtml(clientName || '')},</p>
+
+    <p style="margin:0 0 12px 0;">
+      We’ve prepared your quote (attached). Your estimated <strong>monthly bill is ${money(monthlyInclVat)}</strong>.
+      If you have any questions, call us on <strong>${escapeHtml(brand.phone || '')}</strong> or reply to this email.
+    </p>
+
+    <p style="text-align:center;margin:20px 0;">
+      <a href="${COMPLETE_ORDER_URL}" style="background:#111;color:#fff;padding:12px 18px;border-radius:10px;text-decoration:none;display:inline-block;">
+        Complete Your Order
+      </a>
+    </p>
+
+    <hr style="border:none;border-top:1px solid #e5e7eb;margin:16px 0;" />
+    <p style="margin:0 0 4px 0;"><strong>${escapeHtml(brand.name)}</strong></p>
+    <p style="margin:0 0 2px 0;">${escapeHtml(brand.address || '')}</p>
+    <p style="margin:0 0 2px 0;">${escapeHtml(brand.phone || '')} • <a href="mailto:${escapeHtml(brand.email || '')}">${escapeHtml(brand.email || '')}</a></p>
   </div>`;
 }
 
@@ -144,6 +177,23 @@ export default async function handler(req, res) {
           error: 'reCAPTCHA rejected',
           reason: check.reason,
           meta: check.data ? { action: check.data.action, score: check.data.score, hostname: check.data.hostname } : undefined
+        });
+      }
+
+      // 🔒 Rate limit (after captcha, before heavy work)
+      const ip = remoteIp || 'unknown';
+      const emailForRl = base?.client?.email || '';
+      const rl = await enforceLimits({
+        ip,
+        action: action || 'send_quote',
+        email: emailForRl
+      });
+      if (!rl.ok) {
+        return res.status(429).json({
+          error: 'Too many requests',
+          retry_window: rl.hit.window,
+          limit: rl.hit.limit,
+          remaining: rl.hit.remaining
         });
       }
     }
@@ -193,8 +243,13 @@ export default async function handler(req, res) {
       });
 
       const { error } = await resend.emails.send({
-        from, to, reply_to: from, subject,
-        html: emailBodyWithLink({ brand: base.company, clientName: base.client.name, monthlyInclVat, pdfUrl })
+        from, to, cc: ['sales@voipshop.co.za'], reply_to: from, subject,
+        html: emailBodyLinkDelivery({
+          brand: base.company,
+          clientName: base.client.name,
+          monthlyInclVat,
+          pdfUrl
+        })
       });
       if (error) {
         console.error('[send-quote] Resend send error (link):', error);
@@ -203,8 +258,12 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, delivery: 'link', pdfUrl });
     } else {
       const { error, data } = await resend.emails.send({
-        from, to, reply_to: from, subject,
-        html: emailBodyTiny({ brand: base.company, clientName: base.client.name, monthlyInclVat }),
+        from, to, cc: ['sales@voipshop.co.za'], reply_to: from, subject,
+        html: emailBodyAttachmentDelivery({
+          brand: base.company,
+          clientName: base.client.name,
+          monthlyInclVat
+        }),
         attachments: [
           { filename: `Quote-${base.quoteNumber}.pdf`, content: pdfBuffer.toString('base64'), contentType: 'application/pdf' }
         ]

@@ -1,8 +1,11 @@
 // /api/send-invoice.js
+export const config = { runtime: 'nodejs' };
+
 import { Resend } from 'resend';
 import { put } from '@vercel/blob';
 import { buildInvoicePdfBuffer } from './services/buildInvoicePdfBuffer.js';
-import { verifyRecaptcha } from './_lib/verifyRecaptcha.js'; // 👈 add this
+import { verifyRecaptcha } from './_lib/verifyRecaptcha.js';
+import { enforceLimits } from './_lib/rateLimit.js';
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -105,18 +108,44 @@ export default async function handler(req, res) {
   const base = withDefaults(body);
 
   try {
-    // ✅ Add reCAPTCHA check here
+    // ✅ reCAPTCHA (POST only)
     if (req.method === 'POST') {
       const token = body?.recaptchaToken;
-      const action = body?.recaptchaAction; // expect 'send_invoice'
+      const action = body?.recaptchaAction || 'send_invoice';
       const secret = process.env.RECAPTCHA_SECRET;
       const remoteIp =
         (req.headers['x-forwarded-for'] || '').split(',')[0]?.trim() ||
         req.socket?.remoteAddress;
 
-      const check = await verifyRecaptcha({ token, actionExpected: action, secret, remoteIp, minScore: 0.5 });
+      const check = await verifyRecaptcha({
+        token,
+        actionExpected: action,
+        secret,
+        remoteIp,
+        minScore: Number(process.env.RECAPTCHA_MIN_SCORE || 0.5)
+      });
+
       if (!check.ok) {
-        return res.status(400).json({ error: 'reCAPTCHA rejected', reason: check.reason, meta: check.data });
+        return res.status(400).json({
+          error: 'reCAPTCHA rejected',
+          reason: check.reason,
+          meta: check.data ? { action: check.data.action, score: check.data.score, hostname: check.data.hostname } : undefined
+        });
+      }
+
+      // 🔒 Rate limit (after captcha, before heavy work)
+      const rl = await enforceLimits({
+        ip: remoteIp || 'unknown',
+        action,
+        email: base?.client?.email || ''
+      });
+      if (!rl.ok) {
+        return res.status(429).json({
+          error: 'Too many requests',
+          retry_window: rl.hit.window,
+          limit: rl.hit.limit,
+          remaining: rl.hit.remaining
+        });
       }
     }
 
@@ -132,6 +161,11 @@ export default async function handler(req, res) {
     }
 
     // Delivery: link vs attach
+    if (!process.env.RESEND_API_KEY) {
+      console.error('[send-invoice] Missing RESEND_API_KEY env var');
+      return res.status(500).send('Server not configured (email).');
+    }
+
     const delivery =
       (body.delivery || '').toLowerCase() ||
       (process.env.USE_BLOB_LINK ? 'link' : 'attach');
@@ -141,6 +175,11 @@ export default async function handler(req, res) {
     const subject = `VoIP Shop Invoice • ${base.invoiceNumber} • Order ${base.orderNumber}`;
 
     if (delivery === 'link') {
+      if (!process.env.BLOB_READ_WRITE_TOKEN) {
+        console.error('[send-invoice] Missing BLOB_READ_WRITE_TOKEN for link delivery');
+        return res.status(500).send('BLOB_READ_WRITE_TOKEN not set for link delivery.');
+      }
+
       const keyPart = String(base.invoiceNumber).replace(/[^\w\-]+/g, '-');
       const objectPath = `invoices/${new Date().toISOString().slice(0,10)}/invoice-${keyPart}.pdf`;
 
@@ -162,7 +201,7 @@ export default async function handler(req, res) {
         })
       });
       if (error) {
-        console.error('Resend send error (link):', error);
+        console.error('[send-invoice] Resend send error (link):', error);
         return res.status(502).send('Email send failed: ' + (error?.message || 'unknown'));
       }
       return res.status(200).json({ ok: true, delivery: 'link', pdfUrl });
@@ -180,7 +219,7 @@ export default async function handler(req, res) {
         ]
       });
       if (error) {
-        console.error('Resend send error (attach):', error);
+        console.error('[send-invoice] Resend send error (attach):', error);
         return res.status(502).send('Email send failed: ' + (error?.message || 'unknown'));
       }
       return res.status(200).json({ ok: true, delivery: 'attach', id: data?.id });

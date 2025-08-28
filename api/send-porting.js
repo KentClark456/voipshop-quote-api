@@ -4,6 +4,7 @@ export const config = { runtime: 'nodejs' };
 import { Resend } from 'resend';
 import { buildPortingPdfBuffer } from './services/buildPortingPdfBuffer.js';
 import { verifyRecaptcha } from './_lib/verifyRecaptcha.js';
+import { enforceLimits } from './_lib/rateLimit.js';
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -29,13 +30,12 @@ export default async function handler(req, res) {
       },
       client = {}, // { name, company, email, phone, address }
       port   = {}  // { provider, accountNumber, numbers[], serviceAddress, pbxLocation, contactNumber, idNumber, authorisedName, authorisedTitle }
-
-      // Expect v3 token from frontend securePost(..., 'complete_order_porting')
+      // Expect v3 token from frontend securePost(..., 'complete_order_porting' | 'send_porting')
     } = body;
 
     // ----- reCAPTCHA v3 check (required for POST) -----
     const token = body?.recaptchaToken;
-    const action = body?.recaptchaAction; // e.g. 'complete_order_porting'
+    const action = body?.recaptchaAction || 'send_porting'; // e.g. 'complete_order_porting'
     const secret = process.env.RECAPTCHA_SECRET;
     const remoteIp =
       (req.headers['x-forwarded-for'] || '').split(',')[0]?.trim() ||
@@ -54,6 +54,19 @@ export default async function handler(req, res) {
         error: 'reCAPTCHA rejected',
         reason: rc.reason,
         meta: rc.data ? { action: rc.data.action, score: rc.data.score, hostname: rc.data.hostname } : undefined
+      });
+    }
+
+    // ----- Rate limit (after captcha, before heavy work) -----
+    const ip = remoteIp || 'unknown';
+    const emailForRl = client?.email || '';
+    const rl = await enforceLimits({ ip, action, email: emailForRl });
+    if (!rl.ok) {
+      return res.status(429).json({
+        error: 'Too many requests',
+        retry_window: rl.hit.window,
+        limit: rl.hit.limit,
+        remaining: rl.hit.remaining
       });
     }
 
