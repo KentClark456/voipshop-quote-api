@@ -1,10 +1,10 @@
 // /api/complete-order.js
 import { Resend } from 'resend';
 
-// Ensure Node runtime (NOT edge)
+// --- Force Node runtime (NOT Edge) ---
 export const config = { runtime: 'nodejs' };
 
-// --- CORS allowlist (edit as needed) ---
+// --- CORS allowlist (edit if needed) ---
 const ALLOWED_ORIGINS = new Set([
   'http://127.0.0.1:5500',
   'http://localhost:5500',
@@ -22,6 +22,38 @@ function setCors(res, origin) {
   res.setHeader('Access-Control-Max-Age', '86400'); // 24h
 }
 
+// --- reCAPTCHA v3 server verification ---
+async function verifyRecaptchaV3({ token, action, remoteIp }) {
+  const secret = process.env.RECAPTCHA_SECRET || '';
+  const minScore = Number(process.env.RECAPTCHA_MIN_SCORE || 0.5);
+
+  if (!secret) return { ok: false, reason: 'server_misconfigured_secret_missing' };
+  if (!token) return { ok: false, reason: 'missing_token' };
+
+  const params = new URLSearchParams();
+  params.set('secret', secret);
+  params.set('response', token);
+  if (remoteIp) params.set('remoteip', remoteIp);
+
+  const resp = await fetch('https://www.google.com/recaptcha/api/siteverify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params
+  });
+
+  const data = await resp.json().catch(() => ({}));
+
+  if (!data?.success) return { ok: false, reason: 'verification_failed', data };
+  // If client sent an action, enforce it (prevents token reuse across flows)
+  if (action && data.action && data.action !== action) {
+    return { ok: false, reason: 'action_mismatch', data };
+  }
+  if (typeof data.score === 'number' && data.score < minScore) {
+    return { ok: false, reason: 'low_score', data };
+  }
+  return { ok: true, data };
+}
+
 export default async function handler(req, res) {
   try {
     const origin = req.headers.origin || '';
@@ -30,7 +62,7 @@ export default async function handler(req, res) {
     // ✅ Preflight
     if (req.method === 'OPTIONS') return res.status(204).end();
 
-    // ✅ Health check so visiting the URL in a browser doesn’t crash
+    // ✅ Health check
     if (req.method === 'GET') {
       res.setHeader('Content-Type', 'application/json');
       return res.status(200).json({ ok: true, info: 'complete-order API up' });
@@ -41,34 +73,21 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: 'Method Not Allowed' });
     }
 
-    // ✅ Lazy-load heavy / fragile modules AFTER method checks
-    const [
-      { buildInvoicePdfBuffer },
-      { buildSlaPdfBuffer },
-      { buildPortingPdfBuffer }
-    ] = await Promise.all([
-  import('./services/buildInvoicePdfBuffer.js'),
-  import('./services/buildSlaPdfBuffer.js'),
-  import('./services/buildPortingPdfBuffer.js')
-]);
-
-    // ✅ Safe Resend init (env var must be set in this API project)
-    const resend = new Resend(process.env.RESEND_API_KEY);
-    if (!process.env.RESEND_API_KEY) {
-      console.error('[complete-order] Missing RESEND_API_KEY env var');
-      return res.status(500).json({ error: 'Server not configured (email).' });
-    }
-
-    // ---------- Parse body ----------
+    // ---------- Parse & basic validation ----------
     const body = req.body || {};
     const {
+      // From your frontend payload
       customer = {},       // { name, company, email, phone, address }
       onceOff = { items: [], totals: { exVat: 0 } },
       monthly = { items: [], totals: { exVat: 0 }, cloudPbxQty: 1, extensions: 3, didQty: 1, minutes: 250 },
       debit = {},          // { accountName, bank, branchCode, accountNumber, accountType, dayOfMonth }
       port = {},           // { provider, accountNumber, numbers[], ... }
       orderNumber,
-      invoiceNumber
+      invoiceNumber,
+
+      // reCAPTCHA v3 (sent by your securePost wrapper)
+      recaptchaToken,
+      recaptchaAction
     } = body;
 
     if (!customer?.email) {
@@ -76,23 +95,58 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Missing customer email.' });
     }
 
-    // --- Company defaults
+    // ---------- reCAPTCHA v3 verification (before heavy work) ----------
+    const remoteIp = (req.headers['x-forwarded-for'] || '').split(',')[0]?.trim() || req.socket?.remoteAddress;
+    const rc = await verifyRecaptchaV3({ token: recaptchaToken, action: recaptchaAction, remoteIp });
+
+    if (!rc.ok) {
+      res.setHeader('Content-Type', 'application/json');
+      return res.status(400).json({
+        error: 'reCAPTCHA rejected',
+        reason: rc.reason,
+        meta: rc.data ? { action: rc.data.action, score: rc.data.score, hostname: rc.data.hostname } : undefined
+      });
+    }
+
+    // ---------- Lazy-load heavy modules AFTER captcha passes ----------
+    const [
+      { buildInvoicePdfBuffer },
+      { buildSlaPdfBuffer },
+      { buildPortingPdfBuffer }
+    ] = await Promise.all([
+      import('./services/buildInvoicePdfBuffer.js'),
+      import('./services/buildSlaPdfBuffer.js'),
+      import('./services/buildPortingPdfBuffer.js')
+    ]);
+
+    // ---------- Email client ----------
+    if (!process.env.RESEND_API_KEY) {
+      console.error('[complete-order] Missing RESEND_API_KEY env var');
+      res.setHeader('Content-Type', 'application/json');
+      return res.status(500).json({ error: 'Server not configured (email).' });
+    }
+    const resend = new Resend(process.env.RESEND_API_KEY);
+
+    // ---------- Company defaults ----------
     const COMPANY = {
       name: 'VoIP Shop',
       reg: '2025/406791/07',
       vat: '***',
       address: '23 Lombardy Road, Broadacres, Johannesburg',
-      phone: '+27 68 351 0074',
+      phone: '+27 67 922 8256',
       email: 'sales@voipshop.co.za',
       website: 'https://voipshop.co.za',
       vatRate: 0.15,
       logoUrl: 'https://voipshop.co.za/Assets/Group%201642logo%20(1).png'
     };
 
-    // ---- Build PDFs in parallel
+    // ---------- Build PDF payloads ----------
+    const invNumber = invoiceNumber || 'INV-' + Date.now();
+    const ordNumber = orderNumber || 'VS-' + Math.floor(Math.random() * 1e6);
+
     const invoicePayload = {
-      invoiceNumber: invoiceNumber || 'INV-' + Date.now(),
-      orderNumber: orderNumber || 'VS-' + Math.floor(Math.random() * 1e6),
+      invoiceNumber: invNumber,
+      orderNumber: ordNumber,
       dateISO: new Date().toISOString().slice(0, 10),
       client: {
         name: customer.name || customer.company || '',
@@ -102,10 +156,10 @@ export default async function handler(req, res) {
         address: customer.address || ''
       },
       itemsOnceOff: (onceOff.items || []).map(i => ({
-        name: i.name, qty: Number(i.qty || 1), unit: Number(i.unit || 0)
+        name: i.name, qty: Math.max(1, Number(i.qty || 1)), unit: Number(i.unit || 0)
       })),
       itemsMonthly: (monthly.items || []).map(i => ({
-        name: i.name, qty: Number(i.qty || 1), unit: Number(i.unit || 0)
+        name: i.name, qty: Math.max(1, Number(i.qty || 1)), unit: Number(i.unit || 0)
       })),
       subtotals: {
         onceOff: Number(onceOff?.totals?.exVat || 0),
@@ -113,7 +167,7 @@ export default async function handler(req, res) {
       },
       notes: 'Thank you for your order.',
       company: COMPANY,
-      port // optional
+      port // optional context for invoice footer, if your builder uses it
     };
 
     const slaPayload = {
@@ -132,18 +186,18 @@ export default async function handler(req, res) {
       monthlyInclVat: Number(monthly?.totals?.exVat || 0) * (1 + Number(COMPANY.vatRate || 0.15)),
       vatRate: Number(COMPANY.vatRate || 0.15),
       services: [
-        { name: 'Cloud PBX', qty: Number(monthly.cloudPbxQty || 1) },
-        { name: 'Extensions', qty: Number(monthly.extensions || 3) },
-        { name: 'Geographic Number (DID)', qty: Number(monthly.didQty || 1) },
-        { name: 'Voice Minutes (bundle)', qty: Number(monthly.minutes || 250), unit: 'min' }
+        { name: 'Cloud PBX', qty: Math.max(1, Number(monthly.cloudPbxQty || 1)) },
+        { name: 'Extensions', qty: Math.max(0, Number(monthly.extensions || 3)) },
+        { name: 'Geographic Number (DID)', qty: Math.max(0, Number(monthly.didQty || 1)) },
+        { name: 'Voice Minutes (bundle)', qty: Math.max(0, Number(monthly.minutes || 250)), unit: 'min' }
       ],
       debitOrder: {
-        accountName: debit.accountName,
-        bank: debit.bank,
-        branchCode: debit.branchCode,
-        accountNumber: debit.accountNumber,
-        accountType: debit.accountType,
-        dayOfMonth: debit.dayOfMonth,
+        accountName: debit.accountName || '',
+        bank: debit.bank || '',
+        branchCode: debit.branchCode || '',
+        accountNumber: debit.accountNumber || '',
+        accountType: debit.accountType || '',
+        dayOfMonth: debit.dayOfMonth || '',
         mandateDateISO: new Date().toISOString().slice(0,10)
       },
       serviceDescription: 'Hosted PBX (incl. porting, device provisioning, remote support)'
@@ -151,6 +205,7 @@ export default async function handler(req, res) {
 
     const portingPayload = { company: COMPANY, client: invoicePayload.client, port };
 
+    // ---------- Build PDFs in parallel ----------
     let invoicePdf, slaPdf, portingPdf;
     try {
       [invoicePdf, slaPdf, portingPdf] = await Promise.all([
@@ -164,28 +219,66 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Failed to build one of the PDFs: ' + (e.message || String(e)) });
     }
 
-    const html = `
-      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial;color:#111;max-width:560px;margin:0 auto;padding:24px;">
-        <div style="text-align:center;margin-bottom:16px;">
-          ${COMPANY.logoUrl ? `<img src="${COMPANY.logoUrl}" alt="${COMPANY.name}" style="height:36px;">` : ''}
-        </div>
-        <p>Hi ${invoicePayload.client.name || 'there'},</p>
-        <p>Thank you for your order ${invoicePayload.orderNumber}. We’ve attached your <strong>Invoice</strong>, <strong>Service Level Agreement</strong> and <strong>Porting Letter of Authority</strong>.</p>
-        <p>— ${COMPANY.name} Team</p>
-      </div>`;
+// ---------- Compose and send email ----------
+const html = `
+  <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial;color:#111;max-width:600px;margin:0 auto;padding:24px;">
+    <div style="text-align:center;margin-bottom:16px;">
+      ${COMPANY.logoUrl ? `<img src="${COMPANY.logoUrl}" alt="${COMPANY.name}" style="height:36px;">` : ''}
+    </div>
 
-    const { error, data } = await resend.emails.send({
-      from: 'sales@voipshop.co.za', // must be verified in Resend
-      to: invoicePayload.client.email,
-      reply_to: 'sales@voipshop.co.za',
-      subject: `Order ${invoicePayload.orderNumber} • Invoice, SLA & Porting • VoIP Shop`,
-      html,
-      attachments: [
-        { filename: `Invoice-${invoicePayload.invoiceNumber}.pdf`, content: invoicePdf, contentType: 'application/pdf' },
-        { filename: `Service-Level-Agreement.pdf`,                content: slaPdf,     contentType: 'application/pdf' },
-        { filename: `Porting-Letter-of-Authority.pdf`,            content: portingPdf, contentType: 'application/pdf' }
-      ]
-    });
+    <h2 style="margin:0 0 8px 0;font-size:18px;">Thank you for your order ${ordNumber}</h2>
+    <p style="margin:8px 0 16px 0;">Hi ${invoicePayload.client.name || 'there'},</p>
+
+    <p style="margin:0 0 12px 0;">
+      Thanks for choosing <strong>${COMPANY.name}</strong>. Please see attached:
+    </p>
+    <ul style="margin:0 0 16px 20px; padding:0;">
+      <li>Invoice <strong>${invNumber}</strong></li>
+      <li>Service Level Agreement (SLA)</li>
+      <li>Porting Letter of Authority (LOA)</li>
+    </ul>
+
+    <p style="margin:0 0 12px 0;">
+      To proceed with number porting, please <strong>sign the LOA</strong> and return it together with:
+    </p>
+    <ul style="margin:0 0 16px 20px; padding:0;">
+      <li>Your latest telephone account</li>
+      <li>Your company letterhead</li>
+      <li>A copy of the account holder’s ID</li>
+    </ul>
+
+    <p style="margin:0 0 12px 0;">
+      You can email the documents to <a href="mailto:sales@voipshop.co.za">sales@voipshop.co.za</a>
+      or upload them via the <strong>Completed Order</strong> section on our website.
+    </p>
+
+    <p style="margin:0 0 12px 0;">
+      A support agent will contact you shortly to confirm your order and to schedule an installation time.
+      Please note: installation will be scheduled once the invoice is paid.
+    </p>
+
+    <hr style="border:none;border-top:1px solid #e5e7eb;margin:16px 0;" />
+
+    <p style="margin:0 0 4px 0;"><strong>${COMPANY.name}</strong></p>
+    <p style="margin:0 0 2px 0;">${COMPANY.address}</p>
+    <p style="margin:0 0 2px 0;">${COMPANY.phone} • <a href="mailto:${COMPANY.email}">${COMPANY.email}</a></p>
+    ${COMPANY.website ? `<p style="margin:0;"><a href="${COMPANY.website}">${COMPANY.website}</a></p>` : ''}
+  </div>`;
+
+const { error, data } = await resend.emails.send({
+  from: 'sales@voipshop.co.za', // must be verified in Resend
+  to: invoicePayload.client.email,
+  cc: ['sales@voipshop.co.za'], // ✅ always CC sales
+  reply_to: 'sales@voipshop.co.za',
+  subject: `Order ${ordNumber} • Invoice, SLA & Porting • VoIP Shop`,
+  html,
+  attachments: [
+    { filename: `Invoice-${invNumber}.pdf`,                  content: invoicePdf,  contentType: 'application/pdf' },
+    { filename: `Service-Level-Agreement.pdf`,               content: slaPdf,      contentType: 'application/pdf' },
+    { filename: `Porting-Letter-of-Authority.pdf`,           content: portingPdf,  contentType: 'application/pdf' }
+  ]
+});
+
 
     if (error) {
       console.error('[complete-order] Resend error:', error);
