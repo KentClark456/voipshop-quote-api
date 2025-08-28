@@ -189,40 +189,49 @@ y = await drawLogoHeader(doc, {
 y = Math.max(y, 70);
 doc.y = y;
 
+// ---- Meta strip (Page 1 only)
+if (doc.page.number === 1 && hasSpace(24)) {
+  doc.save();
+  doc.rect(L, y, W, 20).fill(BG);
+  doc.restore();
+  doc.fillColor(BLUE).font('Helvetica-Bold').fontSize(9)
+    .text(`Agreement No: ${slaNumber}`, L + 10, y + 6, { continued: true })
+    .fillColor(MUTED).font('Helvetica').text(`  •  Effective: ${effectiveDateISO}`);
+  moveY(26);
+}
 
-  // ---- Meta strip
-  if (hasSpace(24)) {
-    doc.save();
-    doc.rect(L, y, W, 20).fill(BG);
-    doc.restore();
-    doc.fillColor(BLUE).font('Helvetica-Bold').fontSize(9)
-      .text(`Agreement No: ${slaNumber}`, L + 10, y + 6, { continued: true })
-      .fillColor(MUTED).font('Helvetica').text(`  •  Effective: ${effectiveDateISO}`);
-    moveY(26);
+
+// ✅ Parties — Details (Two-up in one card)
+drawTwoUpCard('Parties — Details (Fill In)',
+  ({ lf }) => {
+    // IMPORTANT: don't force a default width here; let lf use its safe default
+    const tight = (label, val, w) => lf(label, val, w);
+
+    tight('Provider Name',  company?.name || 'VoIP Shop');
+    tight('VAT Number',     company?.vat || '');
+    tight('Phone',          company?.phone || '');
+    tight('Email',          company?.email || '');
+    tight('Website',        company?.website || '');
+
+    // Address: two standard-width lines inside the card
+    tight('Address',        company?.address || '');
+    tight('',               ''); // second line, no label
+  },
+  ({ rf }) => {
+    const tight = (label, val, w) => rf(label, val, w);
+
+    tight('Customer / Company', customer?.name || customer?.company || '');
+    tight('Reg Number',         customer?.reg || '');
+    tight('VAT Number',         customer?.vat || '');
+    tight('Contact Person',     customer?.contact || '');
+    tight('Phone',              customer?.phone || '');
+    tight('Email',              customer?.email || '');
+
+    // Service Address: two standard-width lines inside the card
+    tight('Service Address',    customer?.address || '');
+    tight('',                   ''); // second line, no label
   }
-
-  // ✅ Parties — Details (Two-up in one card)
-  drawTwoUpCard('Parties — Details (Fill In)',
-    ({ lf }) => {
-      const tight = (label, val, w) => lf(label, val, w ?? 120);
-      tight('Provider Name',  company?.name || 'VoIP Shop');
-      tight('VAT Number',     company?.vat || '');
-      tight('Phone',          company?.phone || '');
-      tight('Email',          company?.email || '');
-      tight('Website',        company?.website || '');
-      tight('Address',        company?.address || '', 140);
-    },
-    ({ rf }) => {
-      const tight = (label, val, w) => rf(label, val, w ?? 120);
-      tight('Customer / Company', customer?.name || customer?.company || '');
-      tight('Reg Number',         customer?.reg || '');
-      tight('VAT Number',         customer?.vat || '');
-      tight('Contact Person',     customer?.contact || '');
-      tight('Phone',              customer?.phone || '');
-      tight('Email',              customer?.email || '');
-      tight('Service Address',    customer?.address || '', 140);
-    }
-  );
+);
 
   // ---- Services Ordered — derive + compact pricing table
   const deriveServices = () => {
@@ -342,40 +351,106 @@ doc.y = y;
     line('Monthly Total (incl VAT)', total, true);
   }, { minHeight: 96 });
 
-  // ---- Debit Order Mandate (signature inside; initials AFTER card)
-  drawCard('Debit Order Mandate (Fill In)', (box) => {
-    const labelW = 140;
-    const fill = (label, preset = '', width = box.w - labelW - 22) => {
-      if (!hasSpace(18)) return;
-      const lx = box.x + labelW;
-      doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, box.x, y + 2, { width: labelW - 10 });
-      const ly = y + 11;
-      doc.moveTo(lx, ly).lineTo(lx + width, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-      if (preset) {
-        doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), lx + 2, y + 3, { width: width - 4, ellipsis: true });
-      }
-      moveY(16);
-    };
-    fill('Account Holder', debitOrder?.accountName || '');
-    fill('Bank', debitOrder?.bank || '');
-    fill('Branch Code', debitOrder?.branchCode || '');
-    fill('Account Number', debitOrder?.accountNumber || '');
-    fill('Account Type (e.g., Cheque/Savings)', debitOrder?.accountType || '');
-    fill('Collection Day (1–31)', debitOrder?.dayOfMonth != null ? `Day ${debitOrder.dayOfMonth}` : '', 160);
-    fill('Mandate Date (YYYY-MM-DD)', debitOrder?.mandateDateISO || '', 200);
+// ---- Debit Order Mandate (signature inside; initials AFTER card)
+drawCard('Debit Order Mandate (Fill In)', (box) => {
+  const labelW = 140;
 
-    // Signature + Date ONLY (no initials here)
-    if (hasSpace(26)) {
-      const colW = (box.w - 20) / 2;
-      const sx1 = box.x, sx2 = box.x + colW + 20;
-      const sY = y + 6;
-      doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('Customer Signature', sx1, sY - 10);
-      doc.moveTo(sx1, sY).lineTo(sx1 + colW, sY).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-      doc.text('Date', sx2, sY - 10);
-      doc.moveTo(sx2, sY).lineTo(sx2 + colW, sY).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-      y = sY + 12; doc.y = y;
+  // Single-field row (same as before)
+  const fill = (label, preset = '', width = box.w - labelW - 22) => {
+    if (!hasSpace(18)) return;
+    const lx = box.x + labelW;
+    doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, box.x, y + 2, { width: labelW - 10 });
+    const ly = y + 11;
+    doc.moveTo(lx, ly).lineTo(lx + width, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+    if (preset) {
+      doc.font('Helvetica').fontSize(8).fillColor(INK)
+        .text(String(preset), lx + 2, y + 3, { width: width - 4, ellipsis: true });
     }
-  }, { minHeight: 140 });
+    moveY(16);
+  };
+
+  // Two fields on one row (left + right), to save vertical space
+  const fillTwoUp = (
+    labelA, presetA = '', widthA = 140,
+    labelB, presetB = '', widthB = 160,
+    gap = 24
+  ) => {
+    // LEFT field (uses the standard labelW alignment)
+    if (!hasSpace(18)) return;
+    const lxA = box.x + labelW;
+    doc.font('Helvetica').fontSize(8).fillColor(MUTED)
+      .text(labelA, box.x, y + 2, { width: labelW - 10 });
+    const ly = y + 11;
+    doc.moveTo(lxA, ly).lineTo(lxA + widthA, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+    if (presetA) {
+      doc.font('Helvetica').fontSize(8).fillColor(INK)
+        .text(String(presetA), lxA + 2, y + 3, { width: widthA - 4, ellipsis: true });
+    }
+
+    // RIGHT field: position to the right of the first field + gap
+    const xRight = lxA + widthA + gap;
+    const labelW2 = 110;                   // compact label width on the right
+    const lxB = xRight + labelW2;          // start of the right input line
+    // Ensure we don't overflow the card
+    const maxWB = Math.max(40, Math.min(widthB, (box.x + box.w) - lxB - 4));
+    doc.font('Helvetica').fontSize(8).fillColor(MUTED)
+      .text(labelB, xRight, y + 2, { width: labelW2 - 10 });
+    doc.moveTo(lxB, ly).lineTo(lxB + maxWB, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+    if (presetB) {
+      doc.font('Helvetica').fontSize(8).fillColor(INK)
+        .text(String(presetB), lxB + 2, y + 3, { width: maxWB - 4, ellipsis: true });
+    }
+
+    moveY(16);
+  };
+
+  // Regular rows
+  fill('Account Holder', debitOrder?.accountName || '');
+  fill('Bank', debitOrder?.bank || '');
+  fill('Branch Code', debitOrder?.branchCode || '');
+  fill('Account Number', debitOrder?.accountNumber || '');
+  fill('Account Type (e.g., Cheque/Savings)', debitOrder?.accountType || '');
+
+  // Two-up row: Collection Day + Mandate Date (side-by-side)
+  fillTwoUp(
+    'Collection Day (1–31)', debitOrder?.dayOfMonth != null ? `Day ${debitOrder.dayOfMonth}` : '', 120,
+    'Mandate Date (YYYY-MM-DD)', debitOrder?.mandateDateISO || '', 140, 28
+  );
+
+  // Signature block (light grey area) + Date block to the right
+  if (hasSpace(60)) {
+    const gap = 20;
+    const sigW = Math.min( (box.w * 0.68), box.w - 160 - gap ); // leave room for date block
+    const dateW = Math.min(140, box.w - sigW - gap);
+
+    const labelY = y + 2;
+    doc.font('Helvetica').fontSize(8).fillColor(MUTED)
+      .text('Customer Signature', box.x, labelY);
+
+    const sigY = y + 18;
+    const sigH = 42;
+
+    // Signature area (light grey box)
+    doc.save()
+      .roundedRect(box.x, sigY, sigW, sigH, 6)
+      .fill('#F5F6F7')
+      .restore();
+    doc.roundedRect(box.x, sigY, sigW, sigH, 6).strokeColor('#E5E7EB').lineWidth(1).stroke();
+
+    // Date block on the right (smaller box)
+    const dateX = box.x + sigW + gap;
+    doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('Date', dateX, labelY);
+    doc.save()
+      .roundedRect(dateX, sigY, dateW, sigH, 6)
+      .fill('#F9FAFB')
+      .restore();
+    doc.roundedRect(dateX, sigY, dateW, sigH, 6).strokeColor('#E5E7EB').lineWidth(1).stroke();
+
+    // advance cursor just below the blocks
+    y = sigY + sigH + 8; doc.y = y;
+  }
+}, { minHeight: 140 });
+
 
   // ---- Client Initials — tight at bottom
   const initialsY = pageBottom() - FOOTER_H - 8;

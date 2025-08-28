@@ -171,29 +171,36 @@ export async function buildInvoicePdfBuffer(q = {}) {
     0
   );
 
-  // TABLE (compact, one page)
-  const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
-    const colW = [ W * 0.58, W * 0.12, W * 0.12, W * 0.18 ];
-    const headH = 16;
-    const rowH  = 16; // slim rows
-    let y = doc.y + 6; // <-- give headings some breathing room
+// TABLE (compact, one page)
+const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
+  const colW = [ W * 0.58, W * 0.12, W * 0.12, W * 0.18 ];
+  const headH = 16;
+  const rowH  = 16; // slim rows
 
-    // Title
-    if (!ensureSpace(24, y)) return;
-    doc.font('Helvetica-Bold').fontSize(11.5).fillColor(ink).text(title, L, y, { width: W });
-    y += 5;
+  // --- Title (measure & advance before header so it never gets overlapped) ---
+  let y = doc.y + 10; // extra breathing room before the title
+  if (!ensureSpace(24, y)) return;
 
-    // Header
-    if (!ensureSpace(headH + 2, y)) return;
-    doc.save().rect(L, y, W, headH).fill(thbg).restore();
-    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(ink);
-    const headY = y + 3;
-    doc.text('Description', L + 8, headY, { width: colW[0] - 10 });
-    doc.text('Qty',         L + colW[0], headY, { width: colW[1], align: 'right' });
-    doc.text('Unit',        L + colW[0] + colW[1], headY, { width: colW[2], align: 'right' });
-    doc.text('Amount',      L + colW[0] + colW[1] + colW[2], headY, { width: colW[3], align: 'right' });
-    doc.moveTo(L, y + headH).lineTo(R, y + headH).strokeColor(line).stroke();
-    y += headH + 1;
+  doc.font('Helvetica-Bold').fontSize(11.5).fillColor(ink).text(title, L, y, { width: W });
+
+  // make sure we move BELOW the rendered title height (safest against overlaps)
+  const titleH = doc.heightOfString(title, { width: W });
+  y = Math.max(doc.y, y + titleH) + 6;
+
+  // --- Header ---
+  if (!ensureSpace(headH + 2, y)) return;
+  doc.save().rect(L, y, W, headH).fill(thbg).restore();
+  doc.font('Helvetica-Bold').fontSize(9.5).fillColor(ink);
+  const headY = y + 3;
+  doc.text('Description', L + 8, headY, { width: colW[0] - 10 });
+  doc.text('Qty',         L + colW[0], headY, { width: colW[1], align: 'right' });
+  doc.text('Unit',        L + colW[0] + colW[1], headY, { width: colW[2], align: 'right' });
+  doc.text('Amount',      L + colW[0] + colW[1] + colW[2], headY, { width: colW[3], align: 'right' });
+  doc.moveTo(L, y + headH).lineTo(R, y + headH).strokeColor(line).stroke();
+  y += headH + 1;
+
+  // ... keep the rest of your function identical ...
+
 
     // Body
     doc.font('Helvetica').fontSize(9).fillColor(ink);
@@ -309,20 +316,17 @@ export async function buildInvoicePdfBuffer(q = {}) {
   doc.moveDown(0.4);
   table('Monthly Charges',  q.itemsMonthly || [], monSub,  monVat,  monTotal,  true);
 
-  // Pay-now band (dynamic height to absorb leftover whitespace)
-  const drawPayNow = () => {
-    if (!ensureSpace(26)) return;
-    // Try to use up most of the remaining space tastefully
-    const remaining = Math.max(26, Math.min(64, spaceLeft() - 8)); // cap growth so it doesn't look silly
-    const yBand = doc.y + 2;
-    const bandH = remaining; // dynamic
-    doc.save().roundedRect(L, yBand, W, bandH, 10).fill(pill).restore();
-    doc.roundedRect(L, yBand, W, bandH, 10).strokeColor(line).stroke();
-    doc.font('Helvetica-Bold').fontSize(11.5).fillColor(ink)
-      .text('Pay now (incl VAT)', L + 10, yBand + 8);
-    doc.font('Helvetica-Bold').fontSize(12).fillColor(ink)
-      .text(money(grandPayNow), L, yBand + 8, { width: W - 10, align: 'right' });
-    doc.y = yBand + bandH + 6;
+ // Pay-now band (fixed slim height)
+if (ensureSpace(36)) {
+  const yBand = doc.y + 2;
+  const bandH = 26; // slim height
+  doc.save().roundedRect(L, yBand, W, bandH, 10).fill(pill).restore();
+  doc.roundedRect(L, yBand, W, bandH, 10).strokeColor(line).stroke();
+  doc.font('Helvetica-Bold').fontSize(11.5).fillColor(ink)
+    .text('Pay now (incl VAT)', L + 10, yBand + 8);
+  doc.font('Helvetica-Bold').fontSize(12).fillColor(ink)
+    .text(money(grandPayNow), L, yBand + 8, { width: W - 10, align: 'right' });
+  doc.y = yBand + bandH + 6;
   };
   drawPayNow();
 
