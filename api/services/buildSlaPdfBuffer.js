@@ -189,244 +189,112 @@ y = await drawLogoHeader(doc, {
 y = Math.max(y, 70);
 doc.y = y;
 
-// ---- Meta strip (Page 1 only)
-if (doc.page.number === 1 && hasSpace(24)) {
-  doc.save();
-  doc.rect(L, y, W, 20).fill(BG);
-  doc.restore();
-  doc.fillColor(BLUE).font('Helvetica-Bold').fontSize(9)
-    .text(`Agreement No: ${slaNumber}`, L + 10, y + 6, { continued: true })
-    .fillColor(MUTED).font('Helvetica').text(`  •  Effective: ${effectiveDateISO}`);
-  moveY(26);
-}
 
+  // ---- Meta strip
+  if (hasSpace(24)) {
+    doc.save();
+    doc.rect(L, y, W, 20).fill(BG);
+    doc.restore();
+    doc.fillColor(BLUE).font('Helvetica-Bold').fontSize(9)
+      .text(`Agreement No: ${slaNumber}`, L + 10, y + 6, { continued: true })
+      .fillColor(MUTED).font('Helvetica').text(`  •  Effective: ${effectiveDateISO}`);
+    moveY(26);
+  }
 
 // ✅ Parties — Details (Two-up in one card)
 drawTwoUpCard('Parties — Details (Fill In)',
   ({ lf }) => {
-    // IMPORTANT: don't force a default width here; let lf use its safe default
-    const tight = (label, val, w) => lf(label, val, w);
-
+    const tight = (label, val, w) => lf(label, val, w ?? 120);
     tight('Provider Name',  company?.name || 'VoIP Shop');
     tight('VAT Number',     company?.vat || '');
     tight('Phone',          company?.phone || '');
     tight('Email',          company?.email || '');
     tight('Website',        company?.website || '');
-
-    // Address: two standard-width lines inside the card
-    tight('Address',        company?.address || '');
-    tight('',               ''); // second line, no label
+    // Address → fixed width 120, allow 2 lines
+    lf('Address', company?.address || '', 120, { maxLines: 2 });
   },
   ({ rf }) => {
-    const tight = (label, val, w) => rf(label, val, w);
-
+    const tight = (label, val, w) => rf(label, val, w ?? 120);
     tight('Customer / Company', customer?.name || customer?.company || '');
     tight('Reg Number',         customer?.reg || '');
     tight('VAT Number',         customer?.vat || '');
     tight('Contact Person',     customer?.contact || '');
     tight('Phone',              customer?.phone || '');
     tight('Email',              customer?.email || '');
-
-    // Service Address: two standard-width lines inside the card
-    tight('Service Address',    customer?.address || '');
-    tight('',                   ''); // second line, no label
+    // Service Address → fixed width 120, allow 2 lines
+    rf('Service Address', customer?.address || '', 120, { maxLines: 2 });
   }
-);
+  );
 
-// ---- Services Ordered — derive + compact pricing table
+// ---- Services Ordered — derive + compact pricing table (robust)
 const deriveServices = () => {
-  // If services passed in, normalize key names but keep values
-  if (Array.isArray(services) && services.length) {
-    return services.map(s => {
-      const name = String(s?.name || '');
-      const looksLikeCalls = /call|min(ute)?s?|bundle/i.test(name);
+  // If services explicitly passed, respect them
+  if (Array.isArray(services) && services.length) return services;
 
-      const unitRaw =
-        s.unit ??
-        s.unitPrice ??
-        s.unit_price ??
-        s.price ??
-        (s.pricing && (s.pricing.unit || s.pricing.price));
-
-      const qtyRaw =
-        s.qty ??
-        s.quantity ??
-        s.count ??
-        1;
-
-      const minutesRaw =
-        s.minutes ??
-        s.minutesIncluded ??
-        s.includedMinutes ??
-        s.qtyMinutes ??
-        0;
-
-      const minutes = Number(minutesRaw) || 0;
-
-      return {
-        name,
-        qty: looksLikeCalls ? minutes : (Number(qtyRaw) > 0 ? Number(qtyRaw) : 1),
-        unitPrice: Number(unitRaw) || 0,
-        minutes,
-        looksLikeCalls,
-        note: looksLikeCalls && minutes ? `Includes ${minutes} minutes` : (s.note || '')
-      };
-    });
-  }
-
-  // Else derive from checkout itemsMonthly
   if (!Array.isArray(itemsMonthly) || !itemsMonthly.length) return [];
 
   const globMin = Number(minutesIncluded || 0);
 
-  return itemsMonthly.map(it => {
-    const name = String(it?.name || '');
-    const looksLikeCalls = /call|min(ute)?s?|bundle/i.test(name);
+  // helper to coerce numbers
+  const num = (v) => {
+    const n = Number(v ?? 0);
+    return Number.isFinite(n) ? n : 0;
+  };
 
-    const unitRaw =
-      it.unit ??
-      it.unitPrice ??
-      it.unit_price ??
-      it.price ??
-      (it.pricing && (it.pricing.unit || it.pricing.price));
+  // pick first non-zero numeric from list of keys
+  const pickNum = (obj, keys = []) => {
+    for (const k of keys) {
+      const n = num(obj?.[k]);
+      if (n !== 0) return n;
+    }
+    // return raw zero only if a key exists and is literally 0
+    for (const k of keys) {
+      if (k in (obj || {})) return 0;
+    }
+    return NaN; // signal "not found"
+  };
 
-    const qtyRaw =
-      it.qty ??
-      it.quantity ??
-      it.count ??
-      1;
+  return itemsMonthly.map((it = {}) => {
+    const name = String(it?.name || it?.title || it?.description || '').trim();
 
-    const minutesRaw =
-      it.minutes ??
-      it.minutesIncluded ??
-      it.includedMinutes ??
-      it.qtyMinutes ??
-      0;
+    // detect minutes bundles but do NOT replace qty with minutes
+    const looksLikeCalls = /call|min(ute)?s?/i.test(name);
+    const mins = num(
+      it?.minutes ?? it?.minutesIncluded ?? it?.includedMinutes ?? globMin
+    );
+    const note = looksLikeCalls && mins > 0 ? `Includes ${mins} minutes` : '';
 
-    const minutes = Number(minutesRaw) || (looksLikeCalls ? globMin : 0);
+    // Normalize unit price (prefer monthly/ex-VAT if your table is ex-VAT)
+    let unitPrice =
+      pickNum(it, ['unit', 'unitPrice', 'unit_ex_vat', 'unitExVat']) ;
+    if (Number.isNaN(unitPrice)) {
+      unitPrice = pickNum(it, [
+        'monthly', 'priceMonthly', 'amountMonthly', 'perMonth',
+        'price_ex_vat', 'priceExVat', 'price'
+      ]);
+    }
+    if (Number.isNaN(unitPrice)) unitPrice = 0;
+
+    // Normalize quantity
+    let qty = pickNum(it, ['qty', 'quantity', 'count']);
+    if (Number.isNaN(qty)) {
+      // sometimes quantity is implied by devices/lines
+      if (Array.isArray(it.devices)) qty = it.devices.length;
+      else if (num(it.extensions) > 0) qty = num(it.extensions);
+      else qty = 1;
+    }
+    if (qty <= 0) qty = 1;
 
     return {
       name,
-      qty: looksLikeCalls ? (Number(minutes) || 0) : (Number(qtyRaw) > 0 ? Number(qtyRaw) : 1),
-      unitPrice: Number(unitRaw) || 0,
-      minutes,
-      looksLikeCalls,
-      note: looksLikeCalls && minutes ? `Includes ${minutes} minutes` : ''
+      qty,
+      unitPrice,
+      note
     };
   });
 };
+
 const svc = deriveServices();
-
-// Card: Services Ordered (Monthly)
-drawCard('Services Ordered (Monthly)', ({ x, w }) => {
-  // Column widths: Description, Qty, Unit Price, Line Total
-  const cW = [ w * 0.52, w * 0.12, w * 0.16, w * 0.20 ];
-  const rx = [ x, x + cW[0], x + cW[0] + cW[1], x + cW[0] + cW[1] + cW[2] ];
-
-  // Header row (tight)
-  doc.font('Helvetica-Bold').fontSize(8.2).fillColor(INK);
-  doc.text('Description', rx[0], y, { width: cW[0] });
-  doc.text('Qty',         rx[1], y, { width: cW[1], align: 'right' });
-  doc.text('Unit Price',  rx[2], y, { width: cW[2], align: 'right' });
-  doc.text('Line Total',  rx[3], y, { width: cW[3], align: 'right' });
-  moveY(8);
-  doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#D1D5DB').lineWidth(1).stroke();
-  moveY(4);
-
-  if (!svc.length) {
-    doc.font('Helvetica').fontSize(7.8).fillColor(MUTED)
-       .text('No monthly service lines were supplied. (Pass `services` OR `itemsMonthly` + `minutesIncluded`.)', x, y, { width: w });
-    moveY(10);
-    return;
-  }
-
-  // Dynamically cap rows so Debit Mandate always fits later
-  const rowH = 10;
-  const DEBIT_MIN  = 140;
-  const INITIALS   = 24;
-  const FUDGE_HDR  = 30;
-  const reservedBelow = DEBIT_MIN + INITIALS + 20;
-
-  const roomForRows = (pageBottom() - FOOTER_H - reservedBelow) - y - FUDGE_HDR;
-  let maxRows = Math.max(0, Math.floor(roomForRows / rowH));
-
-  doc.font('Helvetica').fontSize(7.8).fillColor(MUTED);
-  let subtotal = 0;
-  let rendered = 0;
-
-  for (let i = 0; i < svc.length && rendered < maxRows; i++) {
-    const it = svc[i];
-
-    // Bundle-aware line total
-    const unit = Number(it.unitPrice) || 0;
-    const qtyShown = Number(it.qty) || 0;
-    let lineTotal = 0;
-
-    if (it.looksLikeCalls && (Number(it.minutes) > 0)) {
-      const bundleSize =
-        Number(it.bundleSize) ||
-        Number((q?.meta && q.meta.bundleSize)) ||
-        250; // default bundle size
-      const bundles = bundleSize > 0 ? (Number(it.minutes) / bundleSize) : 0;
-      lineTotal = unit * bundles;
-    } else {
-      lineTotal = unit * (qtyShown || 1);
-    }
-
-    subtotal += Number.isFinite(lineTotal) ? lineTotal : 0;
-
-    // Render row
-    doc.text(it.name || '',         rx[0], y, { width: cW[0] });
-    doc.text(String(qtyShown || 0), rx[1], y, { width: cW[1], align: 'right' });
-    doc.text(unit > 0 ? money(unit) : '—', rx[2], y, { width: cW[2], align: 'right' });
-    doc.text(money(lineTotal),      rx[3], y, { width: cW[3], align: 'right' });
-    moveY(rowH);
-
-    if (it.note) {
-      const noteH = doc.heightOfString(it.note, { width: cW[0], lineGap: 0.1 });
-      doc.font('Helvetica-Oblique').fillColor(MUTED)
-         .text(it.note, rx[0], y - 1, { width: cW[0], lineGap: 0.1 });
-      doc.font('Helvetica').fillColor(MUTED);
-      moveY(Math.min(6, noteH));
-    }
-    rendered++;
-  }
-
-  const remaining = Math.max(0, svc.length - rendered);
-  if (remaining > 0) {
-    doc.font('Helvetica-Oblique').fontSize(7.8).fillColor(MUTED)
-       .text(`+${remaining} more item(s) included in totals`, x, y, { width: w });
-    moveY(8);
-    doc.font('Helvetica').fontSize(7.8).fillColor(MUTED);
-  }
-
-  // Totals (monthly)
-  const vat = subtotal * Number(vatRate || 0);
-  const total = subtotal + vat;
-
-  moveY(2);
-  doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#E5E7EB').lineWidth(1).stroke();
-  moveY(3);
-
-  const labelW = 112;
-  const valW   = 104;
-  const valX   = x + w - valW;
-  const labX   = valX - labelW - 6;
-
-  const line = (label, val, bold=false) => {
-    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica')
-       .fontSize(bold ? 8.4 : 8)
-       .fillColor(bold ? INK : MUTED)
-       .text(label, labX, y, { width: labelW, align: 'right' });
-    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(INK)
-       .text(money(val), valX, y, { width: valW, align: 'right' });
-    moveY(bold ? 9 : 8);
-  };
-
-  line('Monthly Subtotal (ex VAT)', subtotal);
-  line(`VAT (${Math.round(Number(vatRate||0)*100)}%)`, vat);
-  line('Monthly Total (incl VAT)', total, true);
-}, { minHeight: 96 });
 
 
 // ---- Debit Order Mandate (signature inside; initials AFTER card)
@@ -547,9 +415,8 @@ drawCard('Debit Order Mandate (Fill In)', (box) => {
 // =========================
 doc.addPage();
 y = await drawLogoHeader(doc, {
-  logoUrl: company?.logoUrl,
-  localLogoHints: [ LOCAL_LOGO ],
-  align: 'right',
+  logoUrl: '',            // 👈 empty so no logo drawn
+  localLogoHints: [],
   title: 'Terms & Conditions',
   subtitle: company?.website || '',
   maxLogoWidth: 130,
@@ -557,7 +424,6 @@ y = await drawLogoHeader(doc, {
 });
 y = Math.max(y, 70);
 doc.y = y;
-
 
   // Column geometry
   const COL_GAP = 22;
@@ -621,14 +487,15 @@ doc.y = y;
       ]
     },
     {
-      title: 'Fees, Billing & Payments',
-      bullets: [
-        'First invoice payable upfront before activation. Thereafter billed monthly in arrears (end of month).',
-        'Payment by debit order or EFT by due date; late payments may suspend service.',
-        'Interest on overdue amounts accrues at prime + 6%.',
-        'Prices exclude VAT unless stated otherwise.',
-        'Usage/call charges (where applicable) are billed in arrears.'
-      ]
+title: 'Fees, Billing & Payments',
+bullets: [
+  'First invoice is payable upfront before activation. Thereafter billing occurs monthly in arrears (end of month).',
+  'Payment must be made by debit order or EFT on or before the due date; late payments may result in service suspension.',
+  'Interest on overdue amounts will accrue at prime + 6%.',
+  'Prices exclude VAT unless otherwise stated.',
+  'Usage/call charges are billed in arrears. Calls over and above the included monthly minutes are billed at 35c per local minute and 55c per mobile minute.',
+  'The Service Order reflects fixed monthly services only and excludes any additional call usage.'
+]
     },
     {
       title: 'Customer Responsibilities',
