@@ -106,6 +106,38 @@ export async function buildInvoicePdfBuffer(q = {}) {
     .text(`Date: ${datePretty}`,                 L, undefined, { width: W, align: 'right' })
     .text(`Valid: ${Number(q.validDays ?? 7)} days`, L, undefined, { width: W, align: 'right' });
 
+    // --- Banking Details (top-right under header) ---
+{
+  // Width of the right-hand panel
+  const bankBoxW = 260;
+  const bankX = R - bankBoxW;
+
+  // Place panel just below the right-aligned header lines
+  const bankY = Math.max(doc.y, headerTop + 6);
+
+  // Panel background + border
+  const bankBoxH = 68; // adjust if you add/remove lines
+  doc.save().roundedRect(bankX, bankY, bankBoxW, bankBoxH, 10).fill('#F9FAFB').restore();
+  doc.roundedRect(bankX, bankY, bankBoxW, bankBoxH, 10).strokeColor(line).stroke();
+
+  // Title
+  doc.font('Helvetica-Bold').fontSize(9.5).fillColor(ink)
+     .text('Banking Details', bankX + 12, bankY + 8, { width: bankBoxW - 24 });
+
+  // Details
+  doc.font('Helvetica').fontSize(8.5).fillColor(ink);
+  const rowX = bankX + 12, rowW = bankBoxW - 24, rowStartY = bankY + 24;
+  doc.text('Umojanet (Pty) Ltd t/a Voipshop', rowX, rowStartY, { width: rowW });
+  doc.text('Bank: Capitec Business',          rowX, undefined,  { width: rowW });
+  doc.text('Account Number: 2100282464',      rowX, undefined,  { width: rowW });
+  doc.text('Branch Code: 470010',             rowX, undefined,  { width: rowW });
+  doc.text('Reference: [Invoice Number]',     rowX, undefined,  { width: rowW });
+
+  // Advance document Y so following content clears the panel
+  doc.y = bankY + bankBoxH + 10;
+}
+
+
   // Company block
   doc.moveDown(1.0);
   if (q.company?.name) {
