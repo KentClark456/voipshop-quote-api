@@ -1,7 +1,221 @@
+// services/buildSlaPdfBuffer.js
+import PDFDocument from 'pdfkit';
+import { drawLogoHeader } from '../../utils/pdf-branding.js';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// From /api/services -> /api/assets (check case: "assets" on Vercel)
+const LOCAL_LOGO = path.resolve(__dirname, '../assets/Group 1642logo (1).png');
+
+export async function buildSlaPdfBuffer(params = {}) {
+  const {
+    company = {},
+    customer = {},
+    slaNumber = `SLA-${new Date().toISOString().slice(0,10).replace(/-/g,'')}`,
+    effectiveDateISO = new Date().toISOString().slice(0,10),
+    noticeDays = 30,
+
+    // fees (VAT calc if needed later)
+    vatRate = 0.15,
+
+    // lines for Services Ordered
+    services = [],
+    itemsMonthly = [],
+    minutesIncluded = 0,
+
+    // Debit order prefill
+    debitOrder = {},
+    serviceDescription = 'Hosted PBX incl. porting, provisioning & remote support'
+  } = params;
+
+  // ---- Palette ----
+  const INK    = '#111827';
+  const MUTED  = '#4B5563';
+  const BG     = '#F5F5F7';
+  const BORDER = '#E5E7EB';
+  const BLUE   = '#0B63E6';
+
+  // ---- Utils ----
+  const money = (n) =>
+    'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  // ---- PDF init ----
+  const doc = new PDFDocument({ size: 'A4', margin: 32 });
+  const chunks = [];
+  doc.on('data', (c) => chunks.push(c));
+  const done = new Promise((res) => doc.on('end', () => res(Buffer.concat(chunks))));
+
+  // ---- Geometry ----
+  const L = 40, R = doc.page.width - 40, W = R - L;
+  const FOOTER_H = 26;
+  const pageBottom = () => doc.page.height - doc.page.margins.bottom;
+  let y = doc.y;
+
+  const hasSpace = (need) => doc.y <= (pageBottom() - (need + FOOTER_H));
+  const moveY = (amt = 0) => { y = (doc.y = (doc.y + amt)); };
+
+  // ---- Footer helper ----
+  const footer = (pageIdx /*1-based*/) => {
+    const yFooter = doc.page.height - 24;
+    doc.font('Helvetica').fontSize(7).fillColor(MUTED)
+      .text(`Agreement No: ${slaNumber} • Page ${pageIdx} of 3`, L, yFooter, { width: W, align: 'right' });
+  };
+
+  // ---- Header helper (title left, logo right) ----
+  const newPageWithHeader = async (title, {
+    subtitle = 'Effective from signing date • Confidential'
+  } = {}) => {
+    if (doc.page && doc.page.number > 1) doc.addPage();
+    // drawLogoHeader handles the logo; we pass hints and let it place the logo (top-right)
+    y = await drawLogoHeader(doc, {
+      logoUrl: company?.logoUrl || '',
+      localLogoHints: [ LOCAL_LOGO ],
+      align: 'right',         // keep logo on the right
+      title,                  // title text
+      subtitle,               // (we’ll only show the blue SLA strip on page 1 below)
+      maxLogoWidth: 130,
+      top: 18
+    });
+    y = Math.max(y, 70);
+    doc.y = y;
+  };
+
+  // ---------- Card helpers ----------
+  const drawCard = (cardTitle, contentCb, options = {}) => {
+    const { headerH = 18, minHeight = 72, gapAfter = 12, innerPad = 12 } = options;
+    const cardTop = y;
+    const x0 = L, w0 = W;
+
+    const titleX = x0 + innerPad;
+    const titleY = cardTop + 8;
+    const contentLeft = x0 + innerPad;
+    const contentTop  = cardTop + headerH + 6;
+    const contentW    = w0 - innerPad * 2;
+
+    // Title (left)
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(INK).text(cardTitle, titleX, titleY, { width: contentW });
+
+    doc.y = contentTop; y = contentTop;
+    contentCb({ x: contentLeft, w: contentW });
+
+    const contentBottom = y + 8;
+    const hCard = Math.max(minHeight, contentBottom - cardTop);
+
+    doc.save();
+    doc.roundedRect(x0, cardTop, w0, hCard, 10).strokeColor(BORDER).lineWidth(1).stroke();
+    doc.restore();
+
+    doc.y = cardTop + hCard + gapAfter; y = doc.y;
+  };
+
+  // Two-up: Parties card
+  const drawTwoUpCard = (cardTitle, leftCb, rightCb) => {
+    const innerPad = 12, headerH = 18, colGap = 18;
+    const cardTop = y, x0 = L, w0 = W;
+
+    const titleX = x0 + innerPad, titleY = cardTop + 8;
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(INK).text(cardTitle, titleX, titleY, { width: w0 - innerPad * 2 });
+
+    const innerLeft = x0 + innerPad, innerTop = cardTop + headerH + 6;
+    const colsW = w0 - innerPad * 2 - colGap;
+    const colW = colsW / 2;
+    const leftX = innerLeft;
+    const rightX = innerLeft + colW + colGap;
+
+    let yLeft = innerTop, yRight = innerTop;
+
+    const lf = (label, preset = '', lineW = 120, { lines = 1 } = {}) => {
+      if (yLeft + 20 > pageBottom() - FOOTER_H - 10) return;
+      const labelW = Math.min(150, Math.max(110, colW * 0.38));
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, leftX, yLeft + 2, { width: labelW - 8 });
+      const sx = leftX + labelW, ly = yLeft + 12;
+      const underlineW = Math.min(lineW, colW - labelW - 8);
+      for (let i = 0; i < lines; i++) {
+        const yLine = ly + (i * 12);
+        doc.moveTo(sx, yLine).lineTo(sx + underlineW, yLine).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+      }
+      if (preset) doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), sx + 2, yLeft + 4, { width: underlineW - 6, ellipsis: true });
+      yLeft += 18 + (lines - 1) * 10;
+    };
+    const rf = (label, preset = '', lineW = 120, { lines = 1 } = {}) => {
+      if (yRight + 20 > pageBottom() - FOOTER_H - 10) return;
+      const labelW = Math.min(150, Math.max(110, colW * 0.38));
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, rightX, yRight + 2, { width: labelW - 8 });
+      const sx = rightX + labelW, ly = yRight + 12;
+      const underlineW = Math.min(lineW, colW - labelW - 8);
+      for (let i = 0; i < lines; i++) {
+        const yLine = ly + (i * 12);
+        doc.moveTo(sx, yLine).lineTo(sx + underlineW, yLine).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+      }
+      if (preset) doc.font('Helvetica').fontSize(8).fillColor(INK).text(String(preset), sx + 2, yRight + 4, { width: underlineW - 6, ellipsis: true });
+      yRight += 18 + (lines - 1) * 10;
+    };
+
+    // Column headings
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text('Provider Details', leftX, innerTop - 2);
+    yLeft += 12;
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text('Customer Details', rightX, innerTop - 2);
+    yRight += 12;
+
+    leftCb({ lf, leftX, colW });
+    rightCb({ rf, rightX, colW });
+
+    const contentBottom = Math.max(yLeft, yRight) + 8;
+    const hCard = Math.max(96, (contentBottom - cardTop));
+
+    doc.save();
+    doc.roundedRect(x0, cardTop, w0, hCard, 10).strokeColor(BORDER).lineWidth(1).stroke();
+    const midX = leftX + colW + (colGap / 2);
+    doc.moveTo(midX, innerTop - 6).lineTo(midX, cardTop + hCard - 8).strokeColor('#EFEFEF').lineWidth(1).stroke();
+    doc.restore();
+
+    doc.y = cardTop + hCard + 12; y = doc.y;
+  };
+
+  // ---- Services derive (ALWAYS from itemsMonthly + minutesIncluded) ----
+  const deriveServices = () => {
+    const items = Array.isArray(itemsMonthly) ? itemsMonthly : [];
+    if (!items.length) return [];
+
+    const globMin = Number(minutesIncluded || 0);
+    const num = (v) => (Number.isFinite(Number(v ?? 0)) ? Number(v) : 0);
+    const pickNum = (obj, keys = []) => {
+      for (const k of keys) {
+        const n = num(obj?.[k]);
+        if (n !== 0) return n;
+      }
+      for (const k of keys) if (k in (obj || {})) return 0;
+      return NaN;
+    };
+
+    return items.map((it = {}) => {
+      const name = String(it?.name || it?.title || it?.description || '').trim();
+
+      const looksLikeCalls = /call|min(ute)?s?/i.test(name);
+      const mins = num(it?.minutes ?? it?.minutesIncluded ?? it?.includedMinutes ?? globMin);
+      const note = looksLikeCalls && mins > 0 ? `Includes ${mins} minutes` : '';
+
+      // Prefer explicit ex-VAT unit fields; then typical monthly fields
+      let unitPrice = pickNum(it, ['unit', 'unitPrice', 'unit_ex_vat', 'unitExVat']);
+      if (Number.isNaN(unitPrice))
+        unitPrice = pickNum(it, ['unitMonthly', 'monthly', 'priceMonthly', 'amountMonthly', 'perMonth', 'price_ex_vat', 'priceExVat', 'price']);
+      if (Number.isNaN(unitPrice)) unitPrice = 0;
+
+      let qty = pickNum(it, ['qty', 'quantity', 'count']);
+      if (Number.isNaN(qty) || qty <= 0) qty = 1;
+
+      return { name, qty, unitPrice, note };
+    });
+  };
+  const svc = deriveServices();
+
   // =========================
   // PAGE 1 — Parties + Services Ordered
   // =========================
-  await newPageWithHeader('Service Level Agreement', { align: 'left' });
+  await newPageWithHeader('Service Level Agreement');
 
   // Blue strip with SLA number (Page 1 only)
   if (hasSpace(24)) {
@@ -36,17 +250,19 @@
     }
   );
 
-  // Services Ordered
+  // Services Ordered (Monthly)
   drawCard('Services Ordered (Monthly)', ({ x, w }) => {
     const cW = [ w * 0.52, w * 0.12, w * 0.16, w * 0.20 ];
     const rx = [ x, x + cW[0], x + cW[0] + cW[1], x + cW[0] + cW[1] + cW[2] ];
 
+    // Header
+    doc.save().rect(x, y, w, 14).fill('#F7F7F8').restore();
     doc.font('Helvetica-Bold').fontSize(8.2).fillColor(INK);
-    doc.text('Description', rx[0], y, { width: cW[0] });
-    doc.text('Qty',         rx[1], y, { width: cW[1], align: 'right' });
-    doc.text('Unit Price',  rx[2], y, { width: cW[2], align: 'right' });
-    doc.text('Line Total',  rx[3], y, { width: cW[3], align: 'right' });
-    moveY(8);
+    doc.text('Description', rx[0], y + 3, { width: cW[0] });
+    doc.text('Qty',         rx[1], y + 3, { width: cW[1], align: 'right' });
+    doc.text('Unit Price',  rx[2], y + 3, { width: cW[2], align: 'right' });
+    doc.text('Line Total',  rx[3], y + 3, { width: cW[3], align: 'right' });
+    moveY(14);
     doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#D1D5DB').lineWidth(1).stroke();
     moveY(4);
 
@@ -58,60 +274,75 @@
     }
 
     const rowH = 10;
+    doc.font('Helvetica').fontSize(7.8).fillColor(MUTED);
     let subtotal = 0;
+
     for (const it of svc) {
+      // Stop if no space for another row + totals
+      if (!hasSpace(rowH + 40)) break;
+
       const lineTotal = (Number(it.unitPrice) || 0) * (Number(it.qty) || 0);
       subtotal += Number.isFinite(lineTotal) ? lineTotal : 0;
 
-      doc.font('Helvetica').fontSize(7.8).fillColor(MUTED);
-      doc.text(it.name || '', rx[0], y, { width: cW[0] });
-      doc.text(String(it.qty || 0), rx[1], y, { width: cW[1], align: 'right' });
+      doc.text(it.name || '',                rx[0], y, { width: cW[0] });
+      doc.text(String(it.qty || 0),          rx[1], y, { width: cW[1], align: 'right' });
       doc.text(it.unitPrice > 0 ? money(it.unitPrice) : '—', rx[2], y, { width: cW[2], align: 'right' });
-      doc.text(money(lineTotal), rx[3], y, { width: cW[3], align: 'right' });
+      doc.text(money(lineTotal),             rx[3], y, { width: cW[3], align: 'right' });
       moveY(rowH);
 
       if (it.note) {
+        const noteH = doc.heightOfString(it.note, { width: cW[0], lineGap: 0.1 });
         doc.font('Helvetica-Oblique').fillColor(MUTED)
-          .text(it.note, rx[0], y - 1, { width: cW[0], lineGap: 0.1 });
-        moveY(6);
+           .text(it.note, rx[0], y - 1, { width: cW[0], lineGap: 0.1 });
+        doc.font('Helvetica').fillColor(MUTED);
+        moveY(Math.min(6, noteH));
       }
     }
 
     const vat = subtotal * Number(vatRate || 0);
     const total = subtotal + vat;
+
     moveY(2);
     doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#E5E7EB').lineWidth(1).stroke();
     moveY(3);
 
-    doc.font('Helvetica').fontSize(8).fillColor(MUTED)
-      .text(`Monthly Subtotal (ex VAT): ${money(subtotal)}`, x, y); moveY(12);
-    doc.text(`VAT (${Math.round(Number(vatRate||0)*100)}%): ${money(vat)}`, x, y); moveY(12);
-    doc.font('Helvetica-Bold').fillColor(INK)
-      .text(`Monthly Total (incl VAT): ${money(total)}`, x, y);
-    moveY(20);
-  });
+    const labelW = 160;
+    const line = (label, val, bold=false) => {
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica')
+         .fontSize(8).fillColor(bold ? INK : MUTED)
+         .text(label, x + w - labelW - 110, y, { width: labelW, align: 'right' });
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(INK)
+         .text(money(val), x + w - 100, y, { width: 100, align: 'right' });
+      moveY(bold ? 10 : 9);
+    };
+    line('Monthly Subtotal (ex VAT)', subtotal);
+    line(`VAT (${Math.round(Number(vatRate||0)*100)}%)`, vat);
+    line('Monthly Total (incl VAT)', total, true);
+  }, { minHeight: 72 });
 
-  // ---- Support & Service Levels (table under services)
+  // Support & Service Levels (fills space below services)
   drawCard('Support & Service Levels', ({ x, w }) => {
-    const colW = [ w * 0.25, w * 0.35, w * 0.40 ];
+    const colW = [ w * 0.28, w * 0.36, w * 0.36 ];
     const rx = [ x, x + colW[0], x + colW[0] + colW[1] ];
 
     // Header row
     doc.save().rect(x, y, w, 14).fill(BG).restore();
     doc.font('Helvetica-Bold').fontSize(8).fillColor(INK);
-    doc.text('Priority', rx[0], y + 3, { width: colW[0], align: 'center' });
-    doc.text('Response Time', rx[1], y + 3, { width: colW[1], align: 'center' });
-    doc.text('Restore Target', rx[2], y + 3, { width: colW[2], align: 'center' });
+    doc.text('Priority',        rx[0], y + 3, { width: colW[0], align: 'center' });
+    doc.text('Response Time',   rx[1], y + 3, { width: colW[1], align: 'center' });
+    doc.text('Restore Target',  rx[2], y + 3, { width: colW[2], align: 'center' });
     moveY(14);
     doc.moveTo(x, y).lineTo(x + w, y).strokeColor(BORDER).stroke();
 
+    // Rows
     const rows = [
-      ['P1 Outage', '1 hour', '8 hours'],
-      ['P2 Major fault', '4 hours', '1 business day'],
-      ['P3/MAC', '1 business day', '2–3 business days']
+      ['P1 Outage',      '1 hour',            '8 hours'],
+      ['P2 Major fault', '4 hours',           '1 business day'],
+      ['P3 / MAC',       '1 business day',    '2–3 business days']
     ];
     doc.font('Helvetica').fontSize(8).fillColor(MUTED);
     for (const r of rows) {
+      if (!hasSpace(16)) break;
       doc.text(r[0], rx[0], y + 3, { width: colW[0], align: 'center' });
       doc.text(r[1], rx[1], y + 3, { width: colW[1], align: 'center' });
       doc.text(r[2], rx[2], y + 3, { width: colW[2], align: 'center' });
@@ -119,15 +350,20 @@
       doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#EEE').stroke();
     }
 
-    moveY(12);
+    moveY(8);
+    // Remote support + WhatsApp
     doc.font('Helvetica').fontSize(8.2).fillColor(MUTED)
-      .text(`Remote support: included (WhatsApp +27 68 351 0074)`, x, y, { width: w });
-    moveY(12);
-    doc.text(`On-site support: R450 per visit (travel/after-hours may apply)`, x, y, { width: w });
-  });
+      .text('Remote support: Included (WhatsApp +27 68 351 0074)', x, y, { width: w });
+    moveY(10);
+    // Call-out fee line
+    doc.text('On-site support: R450 per visit (travel/after-hours may apply).', x, y, { width: w });
+  }, { minHeight: 120 });
 
   // Footer Page 1
   footer(1);
+
+// ---- end Page 1; Page 2/3 continue below ----
+
 
   // =========================
 // PAGE 2 — Debit Order Mandate + T&Cs
@@ -419,5 +655,8 @@ doc.restore();
   doc.moveTo(L + 70, initials3Y + 10).lineTo(L + 170, initials3Y + 10).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
 }
 
-// Footer Page 3
-footer(3);
+// ---- finalize & return buffer ----
+doc.end();
+return done;
+}
+
