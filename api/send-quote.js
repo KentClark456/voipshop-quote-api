@@ -1,7 +1,10 @@
-// api/send-quote.js
+// /api/send-quote.js
+export const config = { runtime: 'nodejs' };
+
 import { Resend } from 'resend';
 import { put } from '@vercel/blob';
 import { buildQuotePdfBuffer } from './services/buildQuotePdfBuffer.js';
+import { verifyRecaptcha } from './_lib/verifyRecaptcha.js';
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -100,7 +103,7 @@ function emailBodyTiny({ brand, clientName, monthlyInclVat }) {
 }
 
 export default async function handler(req, res) {
-  // CORS
+  // --- CORS (simple) ---
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -114,16 +117,43 @@ export default async function handler(req, res) {
     (req.query?.compact === '1' || req.query?.compact === 'true') ||
     (req.body?.compact === true || req.body?.compact === '1');
 
-  const body = req.method === 'POST' ? (req.body || {}) : {};
+  const isPost = req.method === 'POST';
+  const body = isPost ? (req.body || {}) : {};
   const base = withDefaults({ ...body, compact: compactFlag });
 
-  // Decide preview vs email
-  const noEmail = !base?.client?.email;
-  const isPreview = explicitPreview || req.method === 'GET' || noEmail;
-
   try {
+    // ✅ reCAPTCHA v3: run only for POST (email flows)
+    if (isPost) {
+      const token = body?.recaptchaToken;
+      const action = body?.recaptchaAction; // e.g., 'send_quote_button' | 'complete_order_quote'
+      const secret = process.env.RECAPTCHA_SECRET;
+      const remoteIp =
+        (req.headers['x-forwarded-for'] || '').split(',')[0]?.trim() ||
+        req.socket?.remoteAddress;
+
+      const check = await verifyRecaptcha({
+        token,
+        actionExpected: action,
+        secret,
+        remoteIp,
+        minScore: Number(process.env.RECAPTCHA_MIN_SCORE || 0.5)
+      });
+
+      if (!check.ok) {
+        return res.status(400).json({
+          error: 'reCAPTCHA rejected',
+          reason: check.reason,
+          meta: check.data ? { action: check.data.action, score: check.data.score, hostname: check.data.hostname } : undefined
+        });
+      }
+    }
+
     // Build PDF buffer via service
     const pdfBuffer = await buildQuotePdfBuffer(base);
+
+    // Preview vs Email
+    const noEmail = !base?.client?.email;
+    const isPreview = explicitPreview || req.method === 'GET' || noEmail;
 
     if (isPreview) {
       res.setHeader('Content-Type', 'application/pdf');
@@ -131,7 +161,12 @@ export default async function handler(req, res) {
       return res.status(200).send(pdfBuffer);
     }
 
-    // Normal email flow
+    // Email flow
+    if (!process.env.RESEND_API_KEY) {
+      console.error('[send-quote] Missing RESEND_API_KEY env var');
+      return res.status(500).send('Server not configured (email).');
+    }
+
     const delivery =
       (body.delivery || '').toLowerCase() ||
       (process.env.USE_BLOB_LINK ? 'link' : 'attach');
@@ -143,9 +178,10 @@ export default async function handler(req, res) {
 
     if (delivery === 'link') {
       if (!process.env.BLOB_READ_WRITE_TOKEN) {
-        console.error('Missing BLOB_READ_WRITE_TOKEN for link delivery');
+        console.error('[send-quote] Missing BLOB_READ_WRITE_TOKEN for link delivery');
         return res.status(500).send('BLOB_READ_WRITE_TOKEN not set for link delivery.');
       }
+
       const keyPart = String(base.quoteNumber).replace(/[^\w\-]+/g, '-');
       const objectPath = `quotes/${new Date().toISOString().slice(0,10)}/quote-${keyPart}.pdf`;
 
@@ -161,7 +197,7 @@ export default async function handler(req, res) {
         html: emailBodyWithLink({ brand: base.company, clientName: base.client.name, monthlyInclVat, pdfUrl })
       });
       if (error) {
-        console.error('Resend send error (link):', error);
+        console.error('[send-quote] Resend send error (link):', error);
         return res.status(502).send('Email send failed: ' + (error?.message || 'unknown'));
       }
       return res.status(200).json({ ok: true, delivery: 'link', pdfUrl });
@@ -174,13 +210,13 @@ export default async function handler(req, res) {
         ]
       });
       if (error) {
-        console.error('Resend send error (attach):', error);
+        console.error('[send-quote] Resend send error (attach):', error);
         return res.status(502).send('Email send failed: ' + (error?.message || 'unknown'));
       }
       return res.status(200).json({ ok: true, delivery: 'attach', id: data?.id });
     }
   } catch (err) {
-    console.error('send-quote error', err);
+    console.error('[send-quote] error:', err);
     return res.status(500).send(String(err?.message || err) || 'Failed to create/send quote.');
   }
 }

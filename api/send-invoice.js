@@ -1,8 +1,8 @@
-
-// api/send-invoice.js
+// /api/send-invoice.js
 import { Resend } from 'resend';
 import { put } from '@vercel/blob';
 import { buildInvoicePdfBuffer } from './services/buildInvoicePdfBuffer.js';
+import { verifyRecaptcha } from './_lib/verifyRecaptcha.js'; // 👈 add this
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -24,9 +24,6 @@ const COMPANY_DEFAULTS = {
   }
 };
 
-const money = (n) =>
-  'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
 function withDefaults(input = {}) {
   const company = { ...COMPANY_DEFAULTS, ...(input.company || {}) };
   if (!company.colors) company.colors = COMPANY_DEFAULTS.colors;
@@ -46,7 +43,6 @@ function withDefaults(input = {}) {
     orderNumber: input.orderNumber || input.invoiceNumber || 'VS-' + Math.floor(Math.random() * 1e6),
     dateISO: input.dateISO || new Date().toISOString().slice(0, 10),
     dueDays: Number(input.dueDays || 7),
-
     client: { ...(input.client || {}) },
     itemsOnceOff: norm(input.itemsOnceOff),
     itemsMonthly: norm(input.itemsMonthly),
@@ -55,7 +51,7 @@ function withDefaults(input = {}) {
       monthly: Number(input?.subtotals?.monthly || 0)
     },
     notes: input.notes || 'Thank you for your order.',
-    stamp: input.stamp || '',      // e.g. 'PAID'
+    stamp: input.stamp || '',
     compact: !!input.compact,
     company
   };
@@ -105,23 +101,29 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  // Flags
-  const explicitPreview =
-    (req.query?.preview === '1' || req.query?.preview === 'true') ||
-    (req.body?.preview === true || req.body?.preview === '1');
-  const compactFlag =
-    (req.query?.compact === '1' || req.query?.compact === 'true') ||
-    (req.body?.compact === true || req.body?.compact === '1');
-
   const body = req.method === 'POST' ? (req.body || {}) : {};
-  const base = withDefaults({ ...body, compact: compactFlag });
-
-  // Decide preview vs email
-  const noEmail = !base?.client?.email;
-  const isPreview = explicitPreview || req.method === 'GET' || noEmail;
+  const base = withDefaults(body);
 
   try {
+    // ✅ Add reCAPTCHA check here
+    if (req.method === 'POST') {
+      const token = body?.recaptchaToken;
+      const action = body?.recaptchaAction; // expect 'send_invoice'
+      const secret = process.env.RECAPTCHA_SECRET;
+      const remoteIp =
+        (req.headers['x-forwarded-for'] || '').split(',')[0]?.trim() ||
+        req.socket?.remoteAddress;
+
+      const check = await verifyRecaptcha({ token, actionExpected: action, secret, remoteIp, minScore: 0.5 });
+      if (!check.ok) {
+        return res.status(400).json({ error: 'reCAPTCHA rejected', reason: check.reason, meta: check.data });
+      }
+    }
+
     const pdfBuffer = await buildInvoicePdfBuffer(base);
+
+    const noEmail = !base?.client?.email;
+    const isPreview = req.method === 'GET' || noEmail;
 
     if (isPreview) {
       res.setHeader('Content-Type', 'application/pdf');
@@ -129,6 +131,7 @@ export default async function handler(req, res) {
       return res.status(200).send(pdfBuffer);
     }
 
+    // Delivery: link vs attach
     const delivery =
       (body.delivery || '').toLowerCase() ||
       (process.env.USE_BLOB_LINK ? 'link' : 'attach');
@@ -138,10 +141,6 @@ export default async function handler(req, res) {
     const subject = `VoIP Shop Invoice • ${base.invoiceNumber} • Order ${base.orderNumber}`;
 
     if (delivery === 'link') {
-      if (!process.env.BLOB_READ_WRITE_TOKEN) {
-        console.error('Missing BLOB_READ_WRITE_TOKEN for link delivery');
-        return res.status(500).send('BLOB_READ_WRITE_TOKEN not set for link delivery.');
-      }
       const keyPart = String(base.invoiceNumber).replace(/[^\w\-]+/g, '-');
       const objectPath = `invoices/${new Date().toISOString().slice(0,10)}/invoice-${keyPart}.pdf`;
 
