@@ -10,7 +10,15 @@ import { enforceLimits } from './_lib/rateLimit.js';
 const resend = new Resend(process.env.RESEND_API_KEY);
 const COMPLETE_ORDER_URL = process.env.COMPLETE_ORDER_URL || 'https://voipshop.co.za/complete-order';
 
-/* ===== COMPANY DEFAULTS (unchanged) ===== */
+// ---- reCAPTCHA envs (support both names to avoid mismatches) ----
+const RECAPTCHA_SECRET =
+  process.env.RECAPTCHA_V3_SECRET_KEY ||
+  process.env.RECAPTCHA_SECRET_KEY ||
+  process.env.RECAPTCHA_SECRET || '';
+
+const RECAPTCHA_MIN_SCORE = Number(process.env.RECAPTCHA_MIN_SCORE || 0.5);
+
+// ===== COMPANY DEFAULTS (unchanged) =====
 const COMPANY_DEFAULTS = {
   name: 'VoIP Shop',
   address: '23 Lombardy Road, Broadacres, Johannesburg',
@@ -155,28 +163,33 @@ export default async function handler(req, res) {
   const base = withDefaults({ ...body, compact: compactFlag });
 
   try {
-    // ✅ reCAPTCHA v3: run only for POST (email flows)
+    // ✅ reCAPTCHA v3: only for POST (email flows)
     if (isPost) {
+      if (!RECAPTCHA_SECRET) {
+        return res.status(500).json({ error: 'Server misconfigured: missing reCAPTCHA secret env' });
+      }
+
       const token = body?.recaptchaToken;
-      const action = body?.recaptchaAction; // e.g., 'send_quote_button' | 'complete_order_quote'
-      const secret = process.env.RECAPTCHA_SECRET;
+      const action = (body?.recaptchaAction || 'send_quote').trim();
       const remoteIp =
         (req.headers['x-forwarded-for'] || '').split(',')[0]?.trim() ||
         req.socket?.remoteAddress;
 
       const check = await verifyRecaptcha({
         token,
-        actionExpected: action,
-        secret,
+        actionExpected: action,            // we expect the same action we asked client to execute
+        secret: RECAPTCHA_SECRET,
         remoteIp,
-        minScore: Number(process.env.RECAPTCHA_MIN_SCORE || 0.5)
+        minScore: RECAPTCHA_MIN_SCORE
       });
 
-      if (!check.ok) {
+      if (!check?.ok) {
         return res.status(400).json({
           error: 'reCAPTCHA rejected',
-          reason: check.reason,
-          meta: check.data ? { action: check.data.action, score: check.data.score, hostname: check.data.hostname } : undefined
+          reason: check?.reason || 'unknown',
+          meta: check?.data
+            ? { action: check.data.action, score: check.data.score, hostname: check.data.hostname }
+            : undefined
         });
       }
 
@@ -218,7 +231,7 @@ export default async function handler(req, res) {
     }
 
     const delivery =
-      (body.delivery || '').toLowerCase() ||
+      (String(body.delivery || '')).toLowerCase() ||
       (process.env.USE_BLOB_LINK ? 'link' : 'attach');
 
     const from = 'sales@voipshop.co.za';
