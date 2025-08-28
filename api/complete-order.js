@@ -1,6 +1,4 @@
 // /api/complete-order.js
-import { Resend } from 'resend';
-import { enforceLimits } from './_lib/rateLimit.js';
 
 // --- Force Node runtime (NOT Edge) ---
 export const config = { runtime: 'nodejs' };
@@ -25,7 +23,12 @@ function setCors(res, origin) {
 
 // --- reCAPTCHA v3 server verification ---
 async function verifyRecaptchaV3({ token, action, remoteIp }) {
-  const secret = process.env.RECAPTCHA_SECRET || '';
+  const secret =
+    process.env.RECAPTCHA_V3_SECRET_KEY ||
+    process.env.RECAPTCHA_SECRET_KEY ||
+    process.env.RECAPTCHA_SECRET ||
+    '';
+
   const minScore = Number(process.env.RECAPTCHA_MIN_SCORE || 0.5);
 
   if (!secret) return { ok: false, reason: 'server_misconfigured_secret_missing' };
@@ -59,7 +62,7 @@ export default async function handler(req, res) {
     const origin = req.headers.origin || '';
     setCors(res, origin);
 
-    // ✅ Preflight
+    // ✅ Preflight first, before any heavy work/imports
     if (req.method === 'OPTIONS') return res.status(204).end();
 
     // ✅ Health check
@@ -109,9 +112,12 @@ export default async function handler(req, res) {
     }
 
     // ---------- Rate limit (after captcha, before heavy work) ----------
-    const ip = remoteIp || 'unknown';
-    const emailForRl = customer?.email || '';
-    const rl = await enforceLimits({ ip, action: recaptchaAction || 'complete_order_bundle', email: emailForRl });
+    const { enforceLimits } = await import('./_lib/rateLimit.js'); // lazy import
+    const rl = await enforceLimits({
+      ip: remoteIp || 'unknown',
+      action: recaptchaAction || 'complete_order_bundle',
+      email: customer?.email || ''
+    });
     if (!rl.ok) {
       return res.status(429).json({
         error: 'Too many requests',
@@ -132,12 +138,13 @@ export default async function handler(req, res) {
       import('./services/buildPortingPdfBuffer.js')
     ]);
 
-    // ---------- Email client ----------
+    // ---------- Email client (lazy import) ----------
     if (!process.env.RESEND_API_KEY) {
       console.error('[complete-order] Missing RESEND_API_KEY env var');
       res.setHeader('Content-Type', 'application/json');
       return res.status(500).json({ error: 'Server not configured (email).' });
     }
+    const { Resend } = await import('resend');
     const resend = new Resend(process.env.RESEND_API_KEY);
 
     // ---------- Company defaults ----------
