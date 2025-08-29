@@ -62,7 +62,7 @@ export default async function handler(req, res) {
     const origin = req.headers.origin || '';
     setCors(res, origin);
 
-    // ✅ Preflight first, before any heavy work/imports
+    // ✅ Preflight first
     if (req.method === 'OPTIONS') return res.status(204).end();
 
     // ✅ Health check
@@ -79,7 +79,6 @@ export default async function handler(req, res) {
     // ---------- Parse & basic validation ----------
     const body = req.body || {};
     const {
-      // From your frontend payload
       customer = {},       // { name, company, email, phone, address }
       onceOff = { items: [], totals: { exVat: 0 } },
       monthly = { items: [], totals: { exVat: 0 }, cloudPbxQty: 1, extensions: 3, didQty: 1, minutes: 250 },
@@ -98,8 +97,10 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Missing customer email.' });
     }
 
-    // ---------- reCAPTCHA v3 verification (before heavy work) ----------
-    const remoteIp = (req.headers['x-forwarded-for'] || '').split(',')[0]?.trim() || req.socket?.remoteAddress;
+    // ---------- reCAPTCHA v3 verification ----------
+    const remoteIp =
+      (req.headers['x-forwarded-for'] || '').split(',')[0]?.trim() ||
+      req.socket?.remoteAddress;
     const rc = await verifyRecaptchaV3({ token: recaptchaToken, action: recaptchaAction, remoteIp });
 
     if (!rc.ok) {
@@ -111,7 +112,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // ---------- Rate limit (after captcha, before heavy work) ----------
+    // ---------- Rate limit ----------
     const { enforceLimits } = await import('./_lib/rateLimit.js'); // lazy import
     const rl = await enforceLimits({
       ip: remoteIp || 'unknown',
@@ -239,6 +240,42 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Failed to build one of the PDFs: ' + (e.message || String(e)) });
     }
 
+    // ---------- 🧿 NEW: Persist artifacts (PDFs + snapshot) ----------
+    const snapshot = {
+      company: COMPANY,
+      customer,
+      invoicePayload,
+      slaPayload: {
+        ...slaPayload,
+        // keep snapshot compact if you like
+        services: slaPayload.services
+      },
+      portingPayload,
+      onceOff,
+      monthly,
+      orderNumber: ordNumber,
+      invoiceNumber: invNumber,
+      dateISO: invoicePayload.dateISO
+    };
+
+    const { persistOrderArtifacts } = await import('./_lib/persist-order-artifacts.js');
+    let links;
+    try {
+      links = await persistOrderArtifacts({
+        orderNumber: ordNumber,
+        invoiceNumber: invNumber,
+        invoicePdfBuffer: invoicePdf,
+        slaPdfBuffer: slaPdf,
+        portingPdfBuffer: portingPdf,
+        snapshot
+      });
+      // links = { invoiceUrl, slaUrl, portingUrl, metaUrl, orderNumber, invoiceNumber }
+    } catch (e) {
+      // If persistence fails, we still continue with email, but we’ll return no URLs.
+      console.error('[complete-order] persistOrderArtifacts failed:', e);
+      links = { orderNumber: ordNumber, invoiceNumber: invNumber };
+    }
+
     // ---------- Compose email HTML ----------
     const html = `
       <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial;color:#111;max-width:600px;margin:0 auto;padding:24px;">
@@ -285,7 +322,7 @@ export default async function handler(req, res) {
         ${COMPANY.website ? `<p style="margin:0;"><a href="${COMPANY.website}">${COMPANY.website}</a></p>` : ''}
       </div>`;
 
-    // ---------- Send email ----------
+    // ---------- Send email (attachments) ----------
     const { error, data } = await resend.emails.send({
       from: 'sales@voipshop.co.za', // must be verified in Resend
       to: invoicePayload.client.email,
@@ -303,11 +340,24 @@ export default async function handler(req, res) {
     if (error) {
       console.error('[complete-order] Resend error:', error);
       res.setHeader('Content-Type', 'application/json');
-      return res.status(502).json({ error: 'Email send failed: ' + (error?.message || 'unknown') });
+      // Even if email fails, return the persisted URLs (if we got them) so UI can proceed
+      return res.status(502).json({
+        error: 'Email send failed: ' + (error?.message || 'unknown'),
+        orderNumber: ordNumber,
+        invoiceNumber: invNumber,
+        ...links
+      });
     }
 
+    // ---------- Success response (includes URLs for front-end wiring) ----------
     res.setHeader('Content-Type', 'application/json');
-    return res.status(200).json({ ok: true, id: data?.id });
+    return res.status(200).json({
+      ok: true,
+      id: data?.id,
+      orderNumber: ordNumber,
+      invoiceNumber: invNumber,
+      ...links // => invoiceUrl, slaUrl, portingUrl, metaUrl
+    });
   } catch (err) {
     console.error('[complete-order] handler error:', err);
     res.setHeader('Content-Type', 'application/json');

@@ -1,10 +1,5 @@
 // /api/send-quote.js
 export const config = { runtime: 'nodejs' };
-// send-quote.js (top)
-const RECAPTCHA_SECRET =
-  process.env.RECAPTCHA_V3_SECRET_KEY ||
-  process.env.RECAPTCHA_SECRET_KEY ||
-  process.env.RECAPTCHA_SECRET || '';
 
 // Keep simple constants/utilities at top-level (safe for preflight)
 const COMPLETE_ORDER_URL = process.env.COMPLETE_ORDER_URL || 'https://voipshop.co.za/complete-order';
@@ -47,6 +42,8 @@ function withDefaults(input = {}) {
       : [];
 
   return {
+    // Keep whatever orderNumber the client provides (optional at quote time)
+    orderNumber: input.orderNumber || '',
     quoteNumber: input.quoteNumber || 'Q-' + Date.now(),
     dateISO: input.dateISO || new Date().toISOString().slice(0, 10),
     validDays: Number(input.validDays ?? company.validityDays ?? 7),
@@ -220,10 +217,35 @@ export default async function handler(req, res) {
     const { buildQuotePdfBuffer } = await import('./services/buildQuotePdfBuffer.js');
     const pdfBuffer = await buildQuotePdfBuffer(base);
 
+    // --- Persist artifacts (PDF + snapshot) regardless of email delivery method
+    //     We use orderNumber if provided, else store under the quoteNumber folder.
+    const storageOrderId = base.orderNumber || base.quoteNumber;
+    const snapshot = {
+      company: base.company,
+      client: base.client,
+      itemsMonthly: base.itemsMonthly,
+      itemsOnceOff: base.itemsOnceOff,
+      subtotals: base.subtotals,
+      minutesIncluded: body?.minutesIncluded || 0,
+      dateISO: base.dateISO,
+      orderNumber: base.orderNumber || '',
+      quoteNumber: base.quoteNumber
+    };
+
+    const { persistOrderArtifacts } = await import('./_lib/persist-order-artifacts.js');
+    const links = await persistOrderArtifacts({
+      orderNumber: storageOrderId,     // OK to be quoteNumber at quote stage
+      quoteNumber: base.quoteNumber,
+      quotePdfBuffer: pdfBuffer,
+      snapshot
+    });
+    // links.quoteUrl now points at the stored PDF
+
     // --- Email (Resend)
     if (!process.env.RESEND_API_KEY) {
       console.error('[send-quote] Missing RESEND_API_KEY env var');
-      return res.status(500).send('Server not configured (email).');
+      // Even if email fails, we already persisted — return links for UI preview.
+      return res.status(500).json({ ok: false, error: 'Email not configured', ...links });
     }
     const { Resend } = await import('resend');
     const resend = new Resend(process.env.RESEND_API_KEY);
@@ -238,21 +260,7 @@ export default async function handler(req, res) {
     const monthlyInclVat = Number(base.subtotals.monthly || 0) * (1 + Number(base.company.vatRate ?? 0.15));
 
     if (delivery === 'link') {
-      if (!process.env.BLOB_READ_WRITE_TOKEN) {
-        console.error('[send-quote] Missing BLOB_READ_WRITE_TOKEN for link delivery');
-        return res.status(500).send('BLOB_READ_WRITE_TOKEN not set for link delivery.');
-      }
-      const { put } = await import('@vercel/blob');
-      const keyPart = String(base.quoteNumber).replace(/[^\w\-]+/g, '-');
-      const objectPath = `quotes/${new Date().toISOString().slice(0,10)}/quote-${keyPart}.pdf`;
-
-      const { url: pdfUrl } = await put(objectPath, pdfBuffer, {
-        access: 'public',
-        token: process.env.BLOB_READ_WRITE_TOKEN,
-        contentType: 'application/pdf',
-        addRandomSuffix: false
-      });
-
+      const pdfUrl = links.quoteUrl; // use the persisted URL
       const { error } = await resend.emails.send({
         from, to, cc: ['sales@voipshop.co.za'], reply_to: from, subject,
         html: emailBodyLinkDelivery({
@@ -264,9 +272,10 @@ export default async function handler(req, res) {
       });
       if (error) {
         console.error('[send-quote] Resend send error (link):', error);
-        return res.status(502).send('Email send failed: ' + (error?.message || 'unknown'));
+        // Still return persisted link so UI can proceed
+        return res.status(502).json({ ok: false, error: 'Email send failed', ...links });
       }
-      return res.status(200).json({ ok: true, delivery: 'link', pdfUrl });
+      return res.status(200).json({ ok: true, delivery: 'link', ...links });
     } else {
       const { error, data } = await resend.emails.send({
         from, to, cc: ['sales@voipshop.co.za'], reply_to: from, subject,
@@ -281,9 +290,10 @@ export default async function handler(req, res) {
       });
       if (error) {
         console.error('[send-quote] Resend send error (attach):', error);
-        return res.status(502).send('Email send failed: ' + (error?.message || 'unknown'));
+        // Persisted already; return link so UI can still preview
+        return res.status(502).json({ ok: false, error: 'Email send failed', ...links });
       }
-      return res.status(200).json({ ok: true, delivery: 'attach', id: data?.id });
+      return res.status(200).json({ ok: true, delivery: 'attach', id: data?.id, ...links });
     }
   } catch (err) {
     console.error('[send-quote] error:', err);
