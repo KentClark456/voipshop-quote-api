@@ -1,11 +1,17 @@
 // api/_lib/persist-order-artifacts.js
 import { put } from '@vercel/blob';
 
+function safePart(s) {
+  return String(s || '')
+    .trim()
+    .replace(/[^\w\-]+/g, '-')       // letters, numbers, underscore, hyphen
+    .replace(/-{2,}/g, '-')          // collapse multiple dashes
+    .replace(/^-+|-+$/g, '');        // trim leading/trailing dashes
+}
+
 /**
  * Saves PDFs and a snapshot to Vercel Blob under orders/{orderNumber}/...
  * Returns public URLs you can use on the client.
- *
- * Any of the buffers can be null/undefined if not applicable for that request.
  */
 export async function persistOrderArtifacts({
   orderNumber,
@@ -15,53 +21,59 @@ export async function persistOrderArtifacts({
   quotePdfBuffer,     // Buffer | Uint8Array | null
   slaPdfBuffer,       // Buffer | Uint8Array | null
   portingPdfBuffer,   // Buffer | Uint8Array | null
-  snapshot = {}       // the exact inputs used to build the PDFs
+  snapshot = {}
 }) {
   if (!orderNumber) throw new Error('orderNumber is required');
 
-  const base = `orders/${orderNumber}`;
+  const orderSafe = safePart(orderNumber);
+  const invSafe   = safePart(invoiceNumber);
+  const quoteSafe = safePart(quoteNumber);
+
+  const base = `orders/${orderSafe}`;
   const uploads = [];
 
-  // Save snapshot (used later for rebuild fallback)
+  // 1) Snapshot
   uploads.push(
     put(`${base}/meta.json`, JSON.stringify(snapshot, null, 2), {
       access: 'public',
       contentType: 'application/json',
-      cacheControl: 'public, max-age=31536000'
+      cacheControl: 'public, max-age=31536000',
+      addRandomSuffix: false
     })
   );
 
-  // Upload whichever PDFs you have in this request
+  // 2) PDFs
   const HEADERS = {
     access: 'public',
     contentType: 'application/pdf',
-    cacheControl: 'public, max-age=31536000, immutable'
+    cacheControl: 'public, max-age=31536000, immutable',
+    addRandomSuffix: false
   };
 
   if (quotePdfBuffer) {
     uploads.push(put(
-      `${base}/quote-${quoteNumber || orderNumber}.pdf`,
+      `${base}/quote-${quoteSafe || orderSafe}.pdf`,
       quotePdfBuffer,
       HEADERS
     ));
   }
   if (invoicePdfBuffer) {
     uploads.push(put(
-      `${base}/invoice-${invoiceNumber || orderNumber}.pdf`,
+      `${base}/invoice-${invSafe || orderSafe}.pdf`,
       invoicePdfBuffer,
       HEADERS
     ));
   }
   if (slaPdfBuffer) {
     uploads.push(put(
-      `${base}/sla-${invoiceNumber || orderNumber}.pdf`,
+      `${base}/sla-${invSafe || orderSafe}.pdf`,
       slaPdfBuffer,
       HEADERS
     ));
   }
   if (portingPdfBuffer) {
     uploads.push(put(
-      `${base}/porting-${orderNumber}.pdf`,
+      `${base}/porting-${orderSafe}.pdf`,
       portingPdfBuffer,
       HEADERS
     ));
@@ -69,8 +81,8 @@ export async function persistOrderArtifacts({
 
   const results = await Promise.all(uploads);
 
-  // Build a links object (readable later by redirect routes or your UI)
-  const links = { orderNumber, invoiceNumber, quoteNumber };
+  // 3) Build links object
+  const links = { orderNumber: orderSafe, invoiceNumber: invSafe || undefined, quoteNumber: quoteSafe || undefined };
 
   for (const r of results) {
     if (!r?.url) continue;
@@ -84,12 +96,14 @@ export async function persistOrderArtifacts({
     }
   }
 
-  // Save a links.json for easy server-side lookup later
+  // 4) Write links.json
   await put(`${base}/links.json`, JSON.stringify(links, null, 2), {
     access: 'public',
     contentType: 'application/json',
-    cacheControl: 'public, max-age=31536000'
+    cacheControl: 'public, max-age=31536000',
+    addRandomSuffix: false
   });
 
   return links;
 }
+
