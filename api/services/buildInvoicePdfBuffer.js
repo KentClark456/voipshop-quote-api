@@ -106,14 +106,16 @@ export async function buildInvoicePdfBuffer(q = {}) {
     .text(`Date: ${datePretty}`,                 L, undefined, { width: W, align: 'right' })
     .text(`Valid: ${Number(q.validDays ?? 7)} days`, L, undefined, { width: W, align: 'right' });
 
-// --- Banking Details (top-right under header) ---
+// --- Banking Details (top-right) + Company/Client (left) aligned to same top ---
 {
+  // Shared top baseline for both columns (pulled up to sit just below the logo/header)
+  const infoTop = headerTop + 6;
+
+  // Right column: Banking details panel
   const bankBoxW = 260;
   const bankX = R - bankBoxW;
-  const bankY = Math.max(doc.y, headerTop + 6);
-
-  // Slightly taller box (or compute dynamically if you prefer)
-  const bankBoxH = 86; // was 68; gives extra breathing room
+  const bankY = infoTop;
+  const bankBoxH = 86; // adjust if you add more lines
 
   // Panel
   doc.save().roundedRect(bankX, bankY, bankBoxW, bankBoxH, 10).fill('#F9FAFB').restore();
@@ -132,17 +134,13 @@ export async function buildInvoicePdfBuffer(q = {}) {
   doc.text('Branch Code: 470010',             rowX, undefined,  { width: rowW });
   doc.text(`Reference: ${q.invoiceNumber || '[Invoice Number]'}`, rowX, undefined, { width: rowW });
 
-  // ⚠️ IMPORTANT: do NOT advance doc.y here.
-  // We want left-side content to run in parallel.
   const rightColumnBottom = bankY + bankBoxH;
 
-  // --- Left column (Company) in parallel with the bank box ---
+  // Left column: Company + Bill To (aligned to the same top as the bank box)
   const gutter = 12;
   const leftW  = W - bankBoxW - gutter;
 
-  // Start left content aligned with the header area (not pushed down by the panel)
-  const leftStartY = Math.max(doc.y, headerTop + 6);
-  doc.y = leftStartY;
+  doc.y = infoTop;
 
   if (q.company?.name) {
     doc.font('Helvetica-Bold').fontSize(11.5).fillColor(ink)
@@ -155,7 +153,7 @@ export async function buildInvoicePdfBuffer(q = {}) {
       L, undefined, { width: leftW }
     );
 
-  // Client block (still left column)
+  // Client block
   doc.moveDown(0.6);
   doc.font('Helvetica-Bold').fontSize(10.5).fillColor(ink)
     .text('Bill To', L, undefined, { width: leftW });
@@ -166,9 +164,10 @@ export async function buildInvoicePdfBuffer(q = {}) {
     .text(q.client?.phone || '',   L, undefined, { width: leftW })
     .text(q.client?.address || '', L, undefined, { width: leftW });
 
-  // Now advance below whichever column is taller
+  // Advance below whichever column (left or bank panel) is taller
   doc.y = Math.max(doc.y, rightColumnBottom) + 12;
 }
+
 
   // Totals math
   const vatRate = Number(q.company?.vatRate ?? 0.15);
