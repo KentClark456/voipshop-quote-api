@@ -126,6 +126,45 @@ export async function buildQuotePdfBuffer(q = {}) {
      .text(q.client?.phone || '', L, undefined, { width: W })
      .text(q.client?.address || '', L, undefined, { width: W });
 
+  // ---- WHY CHOOSE US (benefits first)
+  if (ensureSpace(90)) {
+    const cardY = doc.y + 10;
+    const cardHmin = 60;
+    const pad = 10;
+    const bullet = (t) => {
+      const x = L + pad + 8;
+      const y = doc.y;
+      doc.circle(L + pad + 2.5, y + 4, 1.4).fill(gray6);
+      doc.fillColor(ink).font('Helvetica').fontSize(9.5)
+         .text(t, x, y, { width: W - pad * 2 - 12, lineGap: 1.0 });
+      doc.fillColor(ink);
+      doc.y += 6;
+    };
+
+    // Card frame
+    doc.save().roundedRect(L, cardY, W, Math.max(cardHmin, 0), 10).fill(pill).restore();
+    doc.roundedRect(L, cardY, W, Math.max(cardHmin, 0), 10).strokeColor(line).stroke();
+
+    // Title
+    doc.font('Helvetica-Bold').fontSize(11).fillColor(ink)
+       .text('Why choose VoIP Shop', L + pad, cardY + 8, { width: W - pad * 2 });
+    doc.y = cardY + 28;
+
+    // Bullets (phrased per your notes)
+    bullet('Buy direct—no sales commissions baked into hardware pricing.');
+    bullet('Own your equipment outright; insure it with your provider at the correct replacement value.');
+    bullet('Avoid finance charges by purchasing equipment upfront through VoIP Shop.');
+    bullet('Get help from a support-led team focused on uptime, not sales targets.');
+
+    // Snap the card height to content
+    const cardBottom = doc.y + 6;
+    const h = Math.max(cardHmin, cardBottom - cardY);
+    doc.save().roundedRect(L, cardY, W, h, 10).strokeColor(line).stroke().restore();
+
+    // Move cursor below card
+    doc.y = cardY + h + 10;
+  }
+
   // Totals (compute once)
   const vatRate = Number(q.company?.vatRate ?? 0.15);
   const onceSub = Number(q.subtotals?.onceOff || 0);
@@ -134,27 +173,28 @@ export async function buildQuotePdfBuffer(q = {}) {
   const monVat  = monSub * vatRate;
   const onceTotal = onceSub + onceVat;
   const monTotal  = monSub + monVat;
-  const grandPayNow = onceTotal + monTotal;
 
-  // Summary cards
-  const yStart = doc.y + 8;
-  const gap = 10;
-  const cardH = 40;
-  const cardW = (W - gap) / 2;
-  if (ensureSpace(cardH + 10)) {
-    const card = (x, y, w, h, title, valueTxt, subtitle) => {
-      doc.save().roundedRect(x, y, w, h, 10).fill(pill).restore();
-      doc.roundedRect(x, y, w, h, 10).strokeColor(line).stroke();
-      doc.font('Helvetica').fontSize(8.6).fillColor(gray6).text(title, x + 10, y + 6);
-      doc.font('Helvetica-Bold').fontSize(12.5).fillColor(ink).text(valueTxt, x + 10, y + 21);
-      if (subtitle) {
-        doc.font('Helvetica').fontSize(8.4).fillColor(gray6)
-           .text(subtitle, x + w - 62, y + 21, { width: 52, align: 'right' });
-      }
-    };
-    card(L, yStart, cardW, cardH, 'MONTHLY', money(monTotal), '/month');
-    card(L + cardW + gap, yStart, cardW, cardH, 'ONCE-OFF', money(onceTotal), 'setup');
-    doc.y = yStart + cardH + 8;
+  // Summary cards (Monthly / Once-off) — clear & no "Pay now"
+  {
+    const yStart = doc.y + 6;
+    const gap = 10;
+    const cardH = 40;
+    const cardW = (W - gap) / 2;
+    if (ensureSpace(cardH + 12, yStart)) {
+      const card = (x, y, w, h, title, valueTxt, subtitle) => {
+        doc.save().roundedRect(x, y, w, h, 10).fill(pill).restore();
+        doc.roundedRect(x, y, w, h, 10).strokeColor(line).stroke();
+        doc.font('Helvetica').fontSize(8.6).fillColor(gray6).text(title, x + 10, y + 6);
+        doc.font('Helvetica-Bold').fontSize(12.5).fillColor(ink).text(valueTxt, x + 10, y + 21);
+        if (subtitle) {
+          doc.font('Helvetica').fontSize(8.4).fillColor(gray6)
+             .text(subtitle, x + w - 62, y + 21, { width: 52, align: 'right' });
+        }
+      };
+      card(L, yStart, cardW, cardH, 'MONTHLY (incl VAT)', money(monTotal), '/month');
+      card(L + cardW + gap, yStart, cardW, cardH, 'ONCE-OFF (incl VAT)', money(onceTotal), 'setup');
+      doc.y = yStart + cardH + 10;
+    }
   }
 
   // Global minutes fallback
@@ -172,15 +212,16 @@ export async function buildQuotePdfBuffer(q = {}) {
     const colW  = [ W * 0.58, W * 0.12, W * 0.12, W * 0.18 ];
     const headH = 14;
     const rowH  = 16;  // slimmer rows
-    let y = doc.y;
 
     // Section title
-    if (!ensureSpace(22, y)) return;
-    doc.font('Helvetica-Bold').fontSize(11).fillColor(ink).text(title, L, y, { width: W });
-    y += 3;
+    if (!ensureSpace(24)) return;
+    const titleY = doc.y;
+    doc.font('Helvetica-Bold').fontSize(11).fillColor(ink).text(title, L, titleY, { width: W });
+    // >>> FIX: sync local y with doc.y to avoid overlap, and add breathing room
+    let y = doc.y + 4;
 
     // Header row
-    if (!ensureSpace(headH + 2, y)) return;
+    if (!ensureSpace(headH + 2, y)) { doc.y = y; return; }
     doc.save().rect(L, y, W, headH).fill(thbg).restore();
     doc.font('Helvetica-Bold').fontSize(9).fillColor(ink);
     const headY = y + 2;
@@ -298,22 +339,10 @@ export async function buildQuotePdfBuffer(q = {}) {
   // Stamp (first page only)
   paintStamp(q.stamp);
 
-  // Sections
+  // Sections (note the spacing fix is inside table())
   table('Once-off Charges', q.itemsOnceOff || [], onceSub, onceVat, onceTotal, false);
-  doc.moveDown(0.3);
+  doc.moveDown(0.6);
   table('Monthly Charges',  q.itemsMonthly || [], monSub,  monVat,  monTotal,  true);
-
-  // Pay-now band
-  if (ensureSpace(36)) {
-    const yBand = doc.y + 2;
-    const bandH = 26;
-    doc.save().roundedRect(L, yBand, W, bandH, 10).fill(pill).restore();
-    doc.roundedRect(L, yBand, W, bandH, 10).strokeColor(line).stroke();
-    doc.font('Helvetica-Bold').fontSize(11).fillColor(ink)
-       .text('Pay now (incl VAT)', L + 10, yBand + 6);
-    doc.text(money(grandPayNow), L, yBand + 6, { width: W - 10, align: 'right' });
-    doc.y = yBand + bandH + 6;
-  }
 
   // Notes (if they fit)
   const notes = [

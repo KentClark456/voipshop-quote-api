@@ -18,7 +18,7 @@ export async function buildSlaPdfBuffer(params = {}) {
     effectiveDateISO = new Date().toISOString().slice(0,10),
     noticeDays = 30,
 
-    // fees (VAT calc if needed later)
+    // VAT / pricing
     vatRate = 0.15,
 
     // lines for Services Ordered
@@ -58,10 +58,14 @@ export async function buildSlaPdfBuffer(params = {}) {
   const moveY = (amt = 0) => { y = (doc.y = (doc.y + amt)); };
 
   // ---- Footer helper ----
-  const footer = (pageIdx /*1-based*/) => {
+  // includeAgreementNo=false removes the "Agreement No: ..." part
+  const footer = (pageIdx /*1-based*/, includeAgreementNo = true) => {
     const yFooter = doc.page.height - 24;
+    const rightText = includeAgreementNo
+      ? `Agreement No: ${slaNumber} • Page ${pageIdx}`
+      : `Page ${pageIdx}`;
     doc.font('Helvetica').fontSize(7).fillColor(MUTED)
-      .text(`Agreement No: ${slaNumber} • Page ${pageIdx} of 3`, L, yFooter, { width: W, align: 'right' });
+      .text(rightText, L, yFooter, { width: W, align: 'right' });
   };
 
   // ---- Header helper (title left, logo right) ----
@@ -69,13 +73,12 @@ export async function buildSlaPdfBuffer(params = {}) {
     subtitle = 'Effective from signing date • Confidential'
   } = {}) => {
     if (doc.page && doc.page.number > 1) doc.addPage();
-    // drawLogoHeader handles the logo; we pass hints and let it place the logo (top-right)
     y = await drawLogoHeader(doc, {
       logoUrl: company?.logoUrl || '',
       localLogoHints: [ LOCAL_LOGO ],
-      align: 'right',         // keep logo on the right
-      title,                  // title text
-      subtitle,               // (we’ll only show the blue SLA strip on page 1 below)
+      align: 'right',
+      title,
+      subtitle,
       maxLogoWidth: 130,
       top: 18
     });
@@ -178,44 +181,57 @@ export async function buildSlaPdfBuffer(params = {}) {
   // ---- Services derive (ALWAYS from itemsMonthly + minutesIncluded) ----
   const deriveServices = () => {
     const items = Array.isArray(itemsMonthly) ? itemsMonthly : [];
-    if (!items.length) return [];
+    if (!items.length) return Array.isArray(services) ? services : [];
 
     const globMin = Number(minutesIncluded || 0);
     const num = (v) => (Number.isFinite(Number(v ?? 0)) ? Number(v) : 0);
+
+    // Pick first numeric from a list of candidate keys; if a key exists but is non-numeric, treat as 0
     const pickNum = (obj, keys = []) => {
       for (const k of keys) {
-        const n = num(obj?.[k]);
-        if (n !== 0) return n;
+        if (obj && (k in obj)) {
+          const n = num(obj[k]);
+          return n;
+        }
       }
-      for (const k of keys) if (k in (obj || {})) return 0;
-      return NaN;
+      return 0;
     };
 
     return items.map((it = {}) => {
-      const name = String(it?.name || it?.title || it?.description || '').trim();
+      const name = String(it?.name || it?.title || it?.description || it?.sku || '').trim();
 
+      // Minutes detection
       const looksLikeCalls = /call|min(ute)?s?/i.test(name);
-      const mins = num(it?.minutes ?? it?.minutesIncluded ?? it?.includedMinutes ?? globMin);
-      const note = looksLikeCalls && mins > 0 ? `Includes ${mins} minutes` : '';
+      const mins = pickNum(it, ['minutes', 'minutesIncluded', 'includedMinutes', 'qtyMinutes', 'qty_min', 'qtyMin', 'bundleMinutes']) || (looksLikeCalls ? globMin : 0);
+      const note = looksLikeCalls && mins > 0 ? `Includes ${mins} minutes` : (String(it?.note || '').trim());
 
-      // Prefer explicit ex-VAT unit fields; then typical monthly fields
-      let unitPrice = pickNum(it, ['unit', 'unitPrice', 'unit_ex_vat', 'unitExVat']);
-      if (Number.isNaN(unitPrice))
-        unitPrice = pickNum(it, ['unitMonthly', 'monthly', 'priceMonthly', 'amountMonthly', 'perMonth', 'price_ex_vat', 'priceExVat', 'price']);
-      if (Number.isNaN(unitPrice)) unitPrice = 0;
+      // Unit price (prefer ex-VAT monthly)
+      let unitPrice = pickNum(it, [
+        'unit', 'unitPrice', 'unit_ex_vat', 'unitExVat', 'unit_price', 'unitPriceExVat',
+        'unitMonthly', 'monthlyExVat', 'monthly', 'priceMonthly', 'amountMonthly',
+        'perMonth', 'price_ex_vat', 'priceExVat', 'price'
+      ]);
 
-      let qty = pickNum(it, ['qty', 'quantity', 'count']);
-      if (Number.isNaN(qty) || qty <= 0) qty = 1;
+      // Support cents field explicitly if provided
+      const unitCents = pickNum(it, ['unitCents', 'unit_cents', 'priceCents', 'price_cents']);
+      if (!unitPrice && unitCents) unitPrice = unitCents / 100;
+
+      // Quantity
+      let qty = pickNum(it, ['qty', 'quantity', 'count', 'devices']);
+      if (!qty || qty <= 0) qty = 1;
 
       return { name, qty, unitPrice, note };
     });
   };
+
   const svc = deriveServices();
 
   // =========================
   // PAGE 1 — Parties + Services Ordered
   // =========================
-  await newPageWithHeader('Service Level Agreement');
+  await newPageWithHeader('Service Level Agreement', {
+    subtitle: `Effective from ${effectiveDateISO} • Notice period ${noticeDays} days`
+  });
 
   // Blue strip with SLA number (Page 1 only)
   if (hasSpace(24)) {
@@ -266,7 +282,8 @@ export async function buildSlaPdfBuffer(params = {}) {
     doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#D1D5DB').lineWidth(1).stroke();
     moveY(4);
 
-    if (!svc.length) {
+    const rows = Array.isArray(svc) ? svc : [];
+    if (!rows.length) {
       doc.font('Helvetica').fontSize(7.8).fillColor(MUTED)
         .text('No monthly service lines were supplied. (Pass `itemsMonthly` + `minutesIncluded`.)', x, y, { width: w });
       moveY(10);
@@ -277,16 +294,18 @@ export async function buildSlaPdfBuffer(params = {}) {
     doc.font('Helvetica').fontSize(7.8).fillColor(MUTED);
     let subtotal = 0;
 
-    for (const it of svc) {
+    for (const it of rows) {
       // Stop if no space for another row + totals
       if (!hasSpace(rowH + 40)) break;
 
-      const lineTotal = (Number(it.unitPrice) || 0) * (Number(it.qty) || 0);
+      const unit = Number(it.unitPrice) || 0;
+      const qty = Number(it.qty) || 0;
+      const lineTotal = unit * qty;
       subtotal += Number.isFinite(lineTotal) ? lineTotal : 0;
 
       doc.text(it.name || '',                rx[0], y, { width: cW[0] });
-      doc.text(String(it.qty || 0),          rx[1], y, { width: cW[1], align: 'right' });
-      doc.text(it.unitPrice > 0 ? money(it.unitPrice) : '—', rx[2], y, { width: cW[2], align: 'right' });
+      doc.text(String(qty || 0),             rx[1], y, { width: cW[1], align: 'right' });
+      doc.text(unit > 0 ? money(unit) : '—', rx[2], y, { width: cW[2], align: 'right' });
       doc.text(money(lineTotal),             rx[3], y, { width: cW[3], align: 'right' });
       moveY(rowH);
 
@@ -320,343 +339,349 @@ export async function buildSlaPdfBuffer(params = {}) {
     line('Monthly Total (incl VAT)', total, true);
   }, { minHeight: 72 });
 
-  // Support & Service Levels (fills space below services)
-  drawCard('Support & Service Levels', ({ x, w }) => {
-    const colW = [ w * 0.28, w * 0.36, w * 0.36 ];
-    const rx = [ x, x + colW[0], x + colW[0] + colW[1] ];
+  // Response Time & Downtime Policy
+  drawCard('Response Time & Downtime Policy', ({ x, w }) => {
+    const maxW = w;
+    const lh = 9;
+    const heading = (t) => {
+      doc.font('Helvetica-Bold').fontSize(8.4).fillColor(INK).text(t, x, y, { width: maxW });
+      moveY(8);
+    };
+    const bullet = (t) => {
+      const dotW = 10;
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('•', x, y, { width: dotW, align: 'center' });
+      doc.text(t, x + dotW, y, { width: maxW - dotW, lineGap: 0.2 });
+      const h = doc.heightOfString(t, { width: maxW - dotW, lineGap: 0.2 });
+      moveY(Math.max(lh, h));
+    };
 
-    // Header row
-    doc.save().rect(x, y, w, 14).fill(BG).restore();
-    doc.font('Helvetica-Bold').fontSize(8).fillColor(INK);
-    doc.text('Priority',        rx[0], y + 3, { width: colW[0], align: 'center' });
-    doc.text('Response Time',   rx[1], y + 3, { width: colW[1], align: 'center' });
-    doc.text('Restore Target',  rx[2], y + 3, { width: colW[2], align: 'center' });
-    moveY(14);
-    doc.moveTo(x, y).lineTo(x + w, y).strokeColor(BORDER).stroke();
+    // Compact content (≤ ~2/5 page)
+    heading('Support Method');
+    bullet('Remote support is the primary channel for all requests (setup, programming, troubleshooting, call quality).');
+    bullet('Onsite call-outs are used only if remote resolution is not possible and are billed at the standard call-out rate (travel/after-hours may apply).');
 
-    // Rows
-    const rows = [
-      ['P1 Outage',      '1 hour',            '8 hours'],
-      ['P2 Major fault', '4 hours',           '1 business day'],
-      ['P3 / MAC',       '1 business day',    '2–3 business days']
-    ];
-    doc.font('Helvetica').fontSize(8).fillColor(MUTED);
-    for (const r of rows) {
-      if (!hasSpace(16)) break;
-      doc.text(r[0], rx[0], y + 3, { width: colW[0], align: 'center' });
-      doc.text(r[1], rx[1], y + 3, { width: colW[1], align: 'center' });
-      doc.text(r[2], rx[2], y + 3, { width: colW[2], align: 'center' });
-      moveY(14);
-      doc.moveTo(x, y).lineTo(x + w, y).strokeColor('#EEE').stroke();
-    }
+    moveY(4);
+    heading('Response Times');
+    bullet('Critical faults (system down, no inbound/outbound calls): remote response within 2 business hours.');
+    bullet('High priority (multiple users affected / severe degradation): within 4 business hours.');
+    bullet('Standard issues (single user / changes / feature queries): within 1 business day.');
+    bullet('Onsite call-outs: scheduled within 24–48 business hours, subject to technician availability (emergency call-outs may be arranged at premium rates if resources allow).');
 
-    moveY(8);
-    // Remote support + WhatsApp
-    doc.font('Helvetica').fontSize(8.2).fillColor(MUTED)
-      .text('Remote support: Included (WhatsApp +27 68 351 0074)', x, y, { width: w });
-    moveY(10);
-    // Call-out fee line
-    doc.text('On-site support: R450 per visit (travel/after-hours may apply).', x, y, { width: w });
-  }, { minHeight: 120 });
+    moveY(4);
+    heading('Availability & Maintenance');
+    bullet('Hosted PBX platform target availability: 99.5% per calendar month.');
+    bullet('Planned maintenance will be communicated at least 48 hours in advance and scheduled after-hours where reasonably possible.');
 
-  // Footer Page 1
-  footer(1);
+    moveY(4);
+    heading('Exclusions');
+    bullet('Customer-owned equipment, cabling, Wi-Fi/LAN, or on-prem network issues.');
+    bullet('Power outages at customer premises or areas, and local internet connectivity unrelated to Darkwire’s network.');
+    bullet('Third-party carrier/upstream provider outages or force majeure events.');
+    bullet('Delays due to customer unavailability for remote sessions or scheduled onsite visits.');
 
-// ---- end Page 1; Page 2/3 continue below ----
+    moveY(4);
+    heading('Escalation');
+    bullet('If an issue cannot be resolved remotely within the stated response time, it will be escalated to an onsite call-out (fees apply).');
+    bullet('Progress updates will be communicated throughout until resolution.');
+  }, { minHeight: 110 });
 
+  // Footer Page 1 (with Agreement No)
+  footer(1, true);
 
   // =========================
-// PAGE 2 — Debit Order Mandate + T&Cs
-// =========================
-await newPageWithHeader('Debit Order Mandate', { align: 'left', subtitle: '' });
+  // PAGE 2 — Debit Order Mandate + T&Cs
+  // =========================
+  await newPageWithHeader('Debit Order Mandate', { subtitle: '' });
 
-drawCard('Debit Order Mandate (Fill In)', (box) => {
-  const labelW = 140;
+  drawCard('Debit Order Mandate (Fill In)', (box) => {
+    const labelW = 140;
 
-  const fill = (label, preset = '', width = box.w - labelW - 22) => {
-    if (!hasSpace(18)) return;
-    const lx = box.x + labelW;
-    doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, box.x, y + 2, { width: labelW - 10 });
-    const ly = y + 11;
-    doc.moveTo(lx, ly).lineTo(lx + width, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-    if (preset) doc.font('Helvetica').fontSize(8).fillColor(INK)
-      .text(String(preset), lx + 2, y + 3, { width: width - 4, ellipsis: true });
-    moveY(16);
-  };
+    const fill = (label, preset = '', width = box.w - labelW - 22) => {
+      if (!hasSpace(18)) return;
+      const lx = box.x + labelW;
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(label, box.x, y + 2, { width: labelW - 10 });
+      const ly = y + 11;
+      doc.moveTo(lx, ly).lineTo(lx + width, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+      if (preset) doc.font('Helvetica').fontSize(8).fillColor(INK)
+        .text(String(preset), lx + 2, y + 3, { width: width - 4, ellipsis: true });
+      moveY(16);
+    };
 
-  const fillTwoUp = (
-    labelA, presetA = '', widthA = 120,
-    labelB, presetB = '', widthB = 140,
-    gap = 24
-  ) => {
-    if (!hasSpace(18)) return;
-    const lxA = box.x + labelW;
-    doc.font('Helvetica').fontSize(8).fillColor(MUTED)
-      .text(labelA, box.x, y + 2, { width: labelW - 10 });
-    const ly = y + 11;
-    doc.moveTo(lxA, ly).lineTo(lxA + widthA, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-    if (presetA) doc.font('Helvetica').fontSize(8).fillColor(INK)
-      .text(String(presetA), lxA + 2, y + 3, { width: widthA - 4, ellipsis: true });
-
-    const xRight = lxA + widthA + gap;
-    const labelW2 = 110;
-    const lxB = xRight + labelW2;
-    const maxWB = Math.max(40, Math.min(widthB, (box.x + box.w) - lxB - 4));
-    doc.font('Helvetica').fontSize(8).fillColor(MUTED)
-      .text(labelB, xRight, y + 2, { width: labelW2 - 10 });
-    doc.moveTo(lxB, ly).lineTo(lxB + maxWB, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-    if (presetB) doc.font('Helvetica').fontSize(8).fillColor(INK)
-      .text(String(presetB), lxB + 2, y + 3, { width: maxWB - 4, ellipsis: true });
-
-    moveY(16);
-  };
-
-  // Prefill rows
-  fill('Account Holder', debitOrder?.accountName || '');
-  fill('Bank', debitOrder?.bank || '');
-  fill('Branch Code', debitOrder?.branchCode || '');
-  fill('Account Number', debitOrder?.accountNumber || '');
-  fill('Account Type (e.g., Cheque/Savings)', debitOrder?.accountType || '');
-
-  fillTwoUp(
-    'Collection Day (1–31)', debitOrder?.dayOfMonth != null ? `Day ${debitOrder.dayOfMonth}` : '', 120,
-    'Mandate Date (YYYY-MM-DD)', debitOrder?.mandateDateISO || '', 140, 28
-  );
-
-  // Signature block + Date block
-  if (hasSpace(60)) {
-    const gap = 20;
-    const sigW = Math.min((box.w * 0.68), box.w - 160 - gap);
-    const dateW = Math.min(140, box.w - sigW - gap);
-
-    const labelY = y + 2;
-    doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('Customer Signature', box.x, labelY);
-
-    const sigY = y + 18, sigH = 42;
-    doc.save().roundedRect(box.x, sigY, sigW, sigH, 6).fill('#F5F6F7').restore();
-    doc.roundedRect(box.x, sigY, sigW, sigH, 6).strokeColor('#E5E7EB').lineWidth(1).stroke();
-
-    const dateX = box.x + sigW + gap;
-    doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('Date', dateX, labelY);
-    doc.save().roundedRect(dateX, sigY, dateW, sigH, 6).fill('#F9FAFB').restore();
-    doc.roundedRect(dateX, sigY, dateW, sigH, 6).strokeColor('#E5E7EB').lineWidth(1).stroke();
-
-    y = sigY + sigH + 8; doc.y = y;
-  }
-}, { minHeight: 140 });
-
-// Debit Order Terms & Conditions (verbatim)
-drawCard('Debit Order Terms & Conditions', ({ x, w }) => {
-  const paras = [
-    'This signed Authority and Mandate refers to our contract dated: (“the Agreement”).',
-    '',
-    'I / We hereby authorise you to issue and deliver payment instructions to your Banker for collection against my / our abovementioned account at my / Our above-mentioned Bank (or any other bank or branch to which I / we may transfer my / our account) on condition that the sum of such payment instructions will never exceed my / our obligations as agreed to in the Agreement and commencing on_________ and continuing until this Authority and Mandate is terminated by me / us by giving you notice in writing of not less than 20 ordinary working days, and sent by prepaid registered post or delivered to your address as indicated above.',
-    '',
-    'The individual payment instructions so authorised to be issued must be issued and delivered as follows: monthly. In the event that the payment day falls on a Sunday, or recognised South African public holiday, the payment day will automatically be the preceding ordinary business day. Payment Instructions due in December may be debited against my account on ____________',
-    '',
-    'I / We understand that the withdrawals hereby authorized will be processed through a computerized system provided by the South African Banks and I also understand that details of each withdrawal will be printed on my bank statement. Each transaction will contain a number, which must be included in the said payment instruction and if provided to you should enable you to identify the Agreement. A payment reference is added to this form before the issuing of any payment instruction.',
-    '',
-    'Mandate',
-    'I / We acknowledge that all payment instructions issued by you shall be treated by my / our above-mentioned Bank as if the instructions have been issued by me/us personally.',
-    '',
-    'Cancellation',
-    'I / We agree that although this Authority and Mandate may be cancelled by me / us, such cancellation will not cancel the Agreement. I / We shall not be entitled to any refund of amounts which you have withdrawn while this Authority was in force, if such amounts were legally owing to you.',
-    '',
-    'Assignment',
-    'I / We acknowledge that this Authority may be ceded or assigned to a third party if the Agreement is also ceded or assigned to that third party, but in the absence of such assignment of the Agreement, this Authority and Mandate cannot be assigned to any third party.'
-  ];
-
-  const writePara = (txt, isHeading = false) => {
-    if (!hasSpace(18)) return false;
-    if (isHeading) {
-      doc.font('Helvetica-Bold').fontSize(8.2).fillColor(INK)
-        .text(txt, x, y, { width: w });
-      moveY(8);
-    } else {
+    const fillTwoUp = (
+      labelA, presetA = '', widthA = 120,
+      labelB, presetB = '', widthB = 140,
+      gap = 24
+    ) => {
+      if (!hasSpace(18)) return;
+      const lxA = box.x + labelW;
       doc.font('Helvetica').fontSize(8).fillColor(MUTED)
-        .text(txt, x, y, { width: w, lineGap: 1.2 });
-      moveY(10);
+        .text(labelA, box.x, y + 2, { width: labelW - 10 });
+      const ly = y + 11;
+      doc.moveTo(lxA, ly).lineTo(lxA + widthA, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+      if (presetA) doc.font('Helvetica').fontSize(8).fillColor(INK)
+        .text(String(presetA), lxA + 2, y + 3, { width: widthA - 4, ellipsis: true });
+
+      const xRight = lxA + widthA + gap;
+      const labelW2 = 110;
+      const lxB = xRight + labelW2;
+      const maxWB = Math.max(40, Math.min(widthB, (box.x + box.w) - lxB - 4));
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED)
+        .text(labelB, xRight, y + 2, { width: labelW2 - 10 });
+      doc.moveTo(lxB, ly).lineTo(lxB + maxWB, ly).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+      if (presetB) doc.font('Helvetica').fontSize(8).fillColor(INK)
+        .text(String(presetB), lxB + 2, y + 3, { width: maxWB - 4, ellipsis: true });
+
+      moveY(16);
+    };
+
+    // Prefill rows
+    fill('Account Holder', debitOrder?.accountName || '');
+    fill('Bank', debitOrder?.bank || '');
+    fill('Branch Code', debitOrder?.branchCode || '');
+    fill('Account Number', debitOrder?.accountNumber || '');
+    fill('Account Type (e.g., Cheque/Savings)', debitOrder?.accountType || '');
+
+    fillTwoUp(
+      'Collection Day (1–31)', debitOrder?.dayOfMonth != null ? `Day ${debitOrder.dayOfMonth}` : '', 120,
+      'Mandate Date (YYYY-MM-DD)', debitOrder?.mandateDateISO || '', 140, 28
+    );
+
+    // Signature block + Date block
+    if (hasSpace(60)) {
+      const gap = 20;
+      const sigW = Math.min((box.w * 0.68), box.w - 160 - gap);
+      const dateW = Math.min(140, box.w - sigW - gap);
+
+      const labelY = y + 2;
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('Customer Signature', box.x, labelY);
+
+      const sigY = y + 18, sigH = 42;
+      doc.save().roundedRect(box.x, sigY, sigW, sigH, 6).fill('#F5F6F7').restore();
+      doc.roundedRect(box.x, sigY, sigW, sigH, 6).strokeColor('#E5E7EB').lineWidth(1).stroke();
+
+      const dateX = box.x + sigW + gap;
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('Date', dateX, labelY);
+      doc.save().roundedRect(dateX, sigY, dateW, sigH, 6).fill('#F9FAFB').restore();
+      doc.roundedRect(dateX, sigY, dateW, sigH, 6).strokeColor('#E5E7EB').lineWidth(1).stroke();
+
+      y = sigY + sigH + 8; doc.y = y;
+    }
+  }, { minHeight: 140 });
+
+  // Debit Order Terms & Conditions (verbatim)
+  drawCard('Debit Order Terms & Conditions', ({ x, w }) => {
+    const paras = [
+      'This signed Authority and Mandate refers to our contract dated: (“the Agreement”).',
+      '',
+      'I / We hereby authorise you to issue and deliver payment instructions to your Banker for collection against my / our abovementioned account at my / Our above-mentioned Bank (or any other bank or branch to which I / we may transfer my / our account) on condition that the sum of such payment instructions will never exceed my / our obligations as agreed to in the Agreement and commencing on_________ and continuing until this Authority and Mandate is terminated by me / us by giving you notice in writing of not less than 20 ordinary working days, and sent by prepaid registered post or delivered to your address as indicated above.',
+      '',
+      'The individual payment instructions so authorised to be issued must be issued and delivered as follows: monthly. In the event that the payment day falls on a Sunday, or recognised South African public holiday, the payment day will automatically be the preceding ordinary business day. Payment Instructions due in December may be debited against my account on ____________',
+      '',
+      'I / We understand that the withdrawals hereby authorized will be processed through a computerized system provided by the South African Banks and I also understand that details of each withdrawal will be printed on my bank statement. Each transaction will contain a number, which must be included in the said payment instruction and if provided to you should enable you to identify the Agreement. A payment reference is added to this form before the issuing of any payment instruction.',
+      '',
+      'Mandate',
+      'I / We acknowledge that all payment instructions issued by you shall be treated by my / our above-mentioned Bank as if the instructions have been issued by me/us personally.',
+      '',
+      'Cancellation',
+      'I / We agree that although this Authority and Mandate may be cancelled by me / us, such cancellation will not cancel the Agreement. I / We shall not be entitled to any refund of amounts which you have withdrawn while this Authority was in force, if such amounts were legally owing to you.',
+      '',
+      'Assignment',
+      'I / We acknowledge that this Authority may be ceded or assigned to a third party if the Agreement is also ceded or assigned to that third party, but in the absence of such assignment of the Agreement, this Authority and Mandate cannot be assigned to any third party.'
+    ];
+
+    const writePara = (txt, isHeading = false) => {
+      if (!hasSpace(18)) return false;
+      if (isHeading) {
+        doc.font('Helvetica-Bold').fontSize(8.2).fillColor(INK)
+          .text(txt, x, y, { width: w });
+        moveY(8);
+      } else {
+        doc.font('Helvetica').fontSize(8).fillColor(MUTED)
+          .text(txt, x, y, { width: w, lineGap: 1.2 });
+        moveY(10);
+      }
+      return true;
+    };
+
+    for (const p of paras) {
+      if (p === '') { moveY(6); continue; }
+      const isHead = /^(Mandate|Cancellation|Assignment)$/.test(p.trim());
+      if (!writePara(p, isHead)) break;
+    }
+  }, { minHeight: 140 });
+
+  // Client initials bottom of page 2
+  {
+    const initials2Y = pageBottom() - FOOTER_H - 8;
+    doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('Client Initials:', L, initials2Y, { width: 90 });
+    doc.moveTo(L + 70, initials2Y + 10).lineTo(L + 170, initials2Y + 10).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
+  }
+
+  // Footer Page 2 (NO Agreement No)
+  footer(2, false);
+
+  // =========================
+  // PAGE 3 — General Terms & Conditions
+  // =========================
+  await newPageWithHeader('Terms & Conditions', { subtitle: '' });
+
+  // Two-column layout
+  const COL_GAP = 22;
+  const COL_W = (W - COL_GAP) / 2;
+  const colX = (i) => L + i * (COL_W + COL_GAP);
+  const colTop = y;
+  const colBottom = pageBottom() - FOOTER_H - 12;
+  let colYs = [colTop, colTop];
+
+  const tryWriteSection = (colIndex, title, bullets) => {
+    let x = colX(colIndex);
+    let yCursor = colYs[colIndex];
+
+    const headerH = 16;
+    const bulletsH = bullets.reduce((acc, t) => {
+      const h = 12 + doc.heightOfString(String(t||''), { width: COL_W - 14, lineGap: 0.5 });
+      return acc + h + 6;
+    }, 0);
+
+    const needed = headerH + bulletsH + 6;
+    if (yCursor + needed > colBottom) return false;
+
+    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK).text(title, x, yCursor, { width: COL_W });
+    doc.moveTo(x, doc.y + 2).lineTo(x + COL_W, doc.y + 2).strokeColor(BORDER).lineWidth(1).stroke();
+    yCursor = doc.y + 8;
+
+    for (const t of bullets) {
+      const bx = x + 8;
+      doc.circle(x + 2.5, yCursor + 3.2, 1.1).fill('#6B7280');
+      doc.fillColor(MUTED).font('Helvetica').fontSize(7.8)
+         .text(t, bx, yCursor, { width: COL_W - 12, lineGap: 0.5 });
+      yCursor = doc.y + 6;
+      doc.fillColor(INK);
+    }
+
+    yCursor += 6;
+    colYs[colIndex] = yCursor;
+    return true;
+  };
+
+  const placeSection = (title, bullets) => {
+    if (!tryWriteSection(0, title, bullets)) {
+      if (!tryWriteSection(1, title, bullets)) return false;
     }
     return true;
   };
 
-  for (const p of paras) {
-    if (p === '') { moveY(6); continue; }
-    const isHead = /^(Mandate|Cancellation|Assignment)$/.test(p.trim());
-    if (!writePara(p, isHead)) break;
+  // NOTE: "Support & Service Levels" REMOVED (now on Page 1)
+  const sections = [
+    {
+      title: 'Fees, Billing & Payments',
+      bullets: [
+        'First invoice is payable upfront before activation. Thereafter billing occurs monthly in arrears (end of month).',
+        'Payment must be made by debit order or EFT on or before the due date; late payments may result in service suspension.',
+        'Interest on overdue amounts will accrue at prime + 6%.',
+        'Prices exclude VAT unless otherwise stated.',
+        'Usage/call charges are billed in arrears. Calls over and above the included monthly minutes are billed at 35c per local minute and 55c per mobile minute.',
+        'The Service Order reflects fixed monthly services only and excludes any additional call usage.'
+      ]
+    },
+    {
+      title: 'Customer Responsibilities',
+      bullets: [
+        'Provide stable power, Internet, and site access for installation/support.',
+        'Maintain LAN/Wi-Fi security; prevent misuse or fraud.',
+        'Use equipment/services lawfully; comply with POPIA for call recording and notices to employees/customers.',
+        'Remain liable for all charges incurred on the account, whether authorised or unauthorised.',
+        'Implement QoS/backup power for critical operations (recommended).'
+      ]
+    },
+    {
+      title: 'Equipment, Porting & Warranty',
+      bullets: [
+        'Hardware sold once-off; ownership passes to Customer upon payment.',
+        'Manufacturer warranties (typically 12 months, return-to-base) apply; excludes surges/liquids/abuse/unauthorised firmware.',
+        'Loan devices may be offered at VoIP Shop’s discretion and current pricing.',
+        'Number porting timelines subject to donor carrier processes; RICA requirements apply.'
+      ]
+    },
+    {
+      title: 'Data Protection (POPIA)',
+      bullets: [
+        'Both parties shall process personal information in compliance with POPIA.',
+        'Where call recording is enabled, Customer must ensure lawful basis, appropriate notices to staff/callers, and retention/deletion policies.',
+        'Customer is responsible for limiting access to recordings and ensuring secure storage of exported data.',
+        'Any suspected breach must be reported without undue delay and cooperatively mitigated.'
+      ]
+    },
+    {
+      title: 'Service Limitations & Exclusions',
+      bullets: [
+        'Quality of service may be affected by Customer LAN/Wi-Fi, power, third-party ISP/carriers, or environmental factors outside VoIP Shop’s control.',
+        'SLA does not cover force majeure events (e.g., load-shedding, strikes, disasters) or faults within third-party networks.',
+        'Moves/Adds/Changes outside standard scope may be chargeable and are handled as P3 tickets.',
+        'Hardware damage from surges/liquids/abuse and unauthorised firmware changes are excluded from warranty.'
+      ]
+    },
+    {
+      title: 'Security, Fair Use & Recording',
+      bullets: [
+        'Customer must safeguard credentials and endpoints; unusual usage may trigger proactive suspensions.',
+        'Fair use applies to minutes and inclusive features to prevent abuse and protect network integrity.',
+        'If call recording is enabled, Customer is responsible for obtaining all required consents and retention policies (POPIA).',
+        'VoIP Shop may implement fraud controls and routing changes without notice to mitigate risk.'
+      ]
+    },
+    {
+      title: 'Maintenance, Changes & Escalations',
+      bullets: [
+        'Planned maintenance will be scheduled outside business hours where possible; emergency maintenance may occur at short notice.',
+        'Configuration change requests (MACs) are handled as P3 tickets with 2–3 business day targets.',
+        'Escalation path available on request; critical incidents prioritised based on impact.'
+      ]
+    },
+    {
+      title: 'Liability, Suspension & Termination',
+      bullets: [
+        'No liability for indirect, consequential, or special damages, including loss of profit or business.',
+        'Liability cap: the lesser of 3 months’ service fees or R100,000.',
+        `Month-to-month; either party may cancel on ${noticeDays} days’ written notice.`,
+        'Non-payment may lead to suspension until all arrears are settled; upon termination, unpaid fees are immediately due.'
+      ]
+    },
+    {
+      title: 'General',
+      bullets: [
+        'This SLA forms part of the overall agreement (signed quotes/orders/policies). If conflicts arise, the latest signed quote/order prevails for pricing/line items.',
+        'Changes to this SLA require written agreement by both parties.',
+        'Governing law: South Africa; venue: Johannesburg.',
+        'If any clause is unenforceable, the remainder remains in force.'
+      ]
+    }
+  ];
+
+  for (const sec of sections) {
+    const ok = placeSection(sec.title, sec.bullets);
+    if (!ok) break;
   }
-}, { minHeight: 140 });
 
-// Client initials bottom of page 2
-{
-  const initials2Y = pageBottom() - FOOTER_H - 8;
-  doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('Client Initials:', L, initials2Y, { width: 90 });
-  doc.moveTo(L + 70, initials2Y + 10).lineTo(L + 170, initials2Y + 10).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-}
+  // Column divider (visual)
+  doc.save();
+  const midX = (L + COL_W) + (COL_GAP / 2);
+  doc.moveTo(midX, colTop - 4).lineTo(midX, colBottom + 4).strokeColor('#F0F0F0').lineWidth(1).stroke();
+  doc.restore();
 
-// Footer Page 2
-footer(2);
-
-
-// =========================
-// PAGE 3 — General Terms & Conditions
-// =========================
-await newPageWithHeader('Terms & Conditions', { align: 'left', subtitle: '' });
-
-// Two-column layout
-const COL_GAP = 22;
-const COL_W = (W - COL_GAP) / 2;
-const colX = (i) => L + i * (COL_W + COL_GAP);
-const colTop = y;
-const colBottom = pageBottom() - FOOTER_H - 12;
-let colYs = [colTop, colTop];
-
-const tryWriteSection = (colIndex, title, bullets) => {
-  let x = colX(colIndex);
-  let yCursor = colYs[colIndex];
-
-  const headerH = 16;
-  const bulletsH = bullets.reduce((acc, t) => {
-    const h = 12 + doc.heightOfString(String(t||''), { width: COL_W - 14, lineGap: 0.5 });
-    return acc + h + 6;
-  }, 0);
-
-  const needed = headerH + bulletsH + 6;
-  if (yCursor + needed > colBottom) return false;
-
-  doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK).text(title, x, yCursor, { width: COL_W });
-  doc.moveTo(x, doc.y + 2).lineTo(x + COL_W, doc.y + 2).strokeColor(BORDER).lineWidth(1).stroke();
-  yCursor = doc.y + 8;
-
-  for (const t of bullets) {
-    const bx = x + 8;
-    doc.circle(x + 2.5, yCursor + 3.2, 1.1).fill('#6B7280');
-    doc.fillColor(MUTED).font('Helvetica').fontSize(7.8)
-       .text(t, bx, yCursor, { width: COL_W - 12, lineGap: 0.5 });
-    yCursor = doc.y + 6;
-    doc.fillColor(INK);
+  // Client initials bottom of page 3
+  {
+    const initials3Y = pageBottom() - FOOTER_H - 8;
+    doc.font('Helvetica').fontSize(8).fillColor(MUTED)
+      .text('Client Initials:', L, initials3Y, { width: 90 });
+    doc.moveTo(L + 70, initials3Y + 10).lineTo(L + 170, initials3Y + 10).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
   }
 
-  yCursor += 6;
-  colYs[colIndex] = yCursor;
-  return true;
-};
+  // Footer Page 3 (NO Agreement No)
+  footer(3, false);
 
-const placeSection = (title, bullets) => {
-  if (!tryWriteSection(0, title, bullets)) {
-    if (!tryWriteSection(1, title, bullets)) return false;
-  }
-  return true;
-};
-
-// NOTE: "Support & Service Levels" REMOVED (now on Page 1)
-const sections = [
-  {
-    title: 'Fees, Billing & Payments',
-    bullets: [
-      'First invoice is payable upfront before activation. Thereafter billing occurs monthly in arrears (end of month).',
-      'Payment must be made by debit order or EFT on or before the due date; late payments may result in service suspension.',
-      'Interest on overdue amounts will accrue at prime + 6%.',
-      'Prices exclude VAT unless otherwise stated.',
-      'Usage/call charges are billed in arrears. Calls over and above the included monthly minutes are billed at 35c per local minute and 55c per mobile minute.',
-      'The Service Order reflects fixed monthly services only and excludes any additional call usage.'
-    ]
-  },
-  {
-    title: 'Customer Responsibilities',
-    bullets: [
-      'Provide stable power, Internet, and site access for installation/support.',
-      'Maintain LAN/Wi-Fi security; prevent misuse or fraud.',
-      'Use equipment/services lawfully; comply with POPIA for call recording and notices to employees/customers.',
-      'Remain liable for all charges incurred on the account, whether authorised or unauthorised.',
-      'Implement QoS/backup power for critical operations (recommended).'
-    ]
-  },
-  {
-    title: 'Equipment, Porting & Warranty',
-    bullets: [
-      'Hardware sold once-off; ownership passes to Customer upon payment.',
-      'Manufacturer warranties (typically 12 months, return-to-base) apply; excludes surges/liquids/abuse/unauthorised firmware.',
-      'Loan devices may be offered at VoIP Shop’s discretion and current pricing.',
-      'Number porting timelines subject to donor carrier processes; RICA requirements apply.'
-    ]
-  },
-  {
-    title: 'Data Protection (POPIA)',
-    bullets: [
-      'Both parties shall process personal information in compliance with POPIA.',
-      'Where call recording is enabled, Customer must ensure lawful basis, appropriate notices to staff/callers, and retention/deletion policies.',
-      'Customer is responsible for limiting access to recordings and ensuring secure storage of exported data.',
-      'Any suspected breach must be reported without undue delay and cooperatively mitigated.'
-    ]
-  },
-  {
-    title: 'Service Limitations & Exclusions',
-    bullets: [
-      'Quality of service may be affected by Customer LAN/Wi-Fi, power, third-party ISP/carriers, or environmental factors outside VoIP Shop’s control.',
-      'SLA does not cover force majeure events (e.g., load-shedding, strikes, disasters) or faults within third-party networks.',
-      'Moves/Adds/Changes outside standard scope may be chargeable and are handled as P3 tickets.',
-      'Hardware damage from surges/liquids/abuse and unauthorised firmware changes are excluded from warranty.'
-    ]
-  },
-  {
-    title: 'Security, Fair Use & Recording',
-    bullets: [
-      'Customer must safeguard credentials and endpoints; unusual usage may trigger proactive suspensions.',
-      'Fair use applies to minutes and inclusive features to prevent abuse and protect network integrity.',
-      'If call recording is enabled, Customer is responsible for obtaining all required consents and retention policies (POPIA).',
-      'VoIP Shop may implement fraud controls and routing changes without notice to mitigate risk.'
-    ]
-  },
-  {
-    title: 'Maintenance, Changes & Escalations',
-    bullets: [
-      'Planned maintenance will be scheduled outside business hours where possible; emergency maintenance may occur at short notice.',
-      'Configuration change requests (MACs) are handled as P3 tickets with 2–3 business day targets.',
-      'Escalation path available on request; critical incidents prioritised based on impact.'
-    ]
-  },
-  {
-    title: 'Liability, Suspension & Termination',
-    bullets: [
-      'No liability for indirect, consequential, or special damages, including loss of profit or business.',
-      'Liability cap: the lesser of 3 months’ service fees or R100,000.',
-      `Month-to-month; either party may cancel on ${noticeDays} days’ written notice.`,
-      'Non-payment may lead to suspension until all arrears are settled; upon termination, unpaid fees are immediately due.'
-    ]
-  },
-  {
-    title: 'General',
-    bullets: [
-      'This SLA forms part of the overall agreement (signed quotes/orders/policies). If conflicts arise, the latest signed quote/order prevails for pricing/line items.',
-      'Changes to this SLA require written agreement by both parties.',
-      'Governing law: South Africa; venue: Johannesburg.',
-      'If any clause is unenforceable, the remainder remains in force.'
-    ]
-  }
-];
-
-for (const sec of sections) {
-  const ok = placeSection(sec.title, sec.bullets);
-  if (!ok) break;
-}
-
-// Column divider (visual)
-doc.save();
-const midX = (L + COL_W) + (COL_GAP / 2);
-doc.moveTo(midX, colTop - 4).lineTo(midX, colBottom + 4).strokeColor('#F0F0F0').lineWidth(1).stroke();
-doc.restore();
-
-// Client initials bottom of page 3
-{
-  const initials3Y = pageBottom() - FOOTER_H - 8;
-  doc.font('Helvetica').fontSize(8).fillColor(MUTED)
-    .text('Client Initials:', L, initials3Y, { width: 90 });
-  doc.moveTo(L + 70, initials3Y + 10).lineTo(L + 170, initials3Y + 10).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
-}
-
-// ---- finalize & return buffer ----
-doc.end();
-return done;
+  // ---- finalize & return buffer ----
+  doc.end();
+  return await done;
 }
 
