@@ -106,16 +106,20 @@ export async function buildInvoicePdfBuffer(q = {}) {
     .text(`Date: ${datePretty}`,                 L, undefined, { width: W, align: 'right' })
     .text(`Valid: ${Number(q.validDays ?? 7)} days`, L, undefined, { width: W, align: 'right' });
 
-// --- Banking Details (top-right) + Company/Client (left) aligned to same top ---
+// --- Banking Details (top-right) + Company/Client (left) with safe header clearance ---
 {
-  // Shared top baseline for both columns (pulled up to sit just below the logo/header)
-  const infoTop = headerTop + 6;
+  // After the "Invoice / Date / Valid" lines above, capture how far down we are:
+  const metaBottom = doc.y;
+
+  // Keep a conservative gap under logo/header so we never overlap either side
+  const SAFE_HEADER_CLEARANCE = 72; // tweak to 80–90 if your logo is taller
+  const infoTop = Math.max(metaBottom + 8, headerTop + SAFE_HEADER_CLEARANCE);
 
   // Right column: Banking details panel
   const bankBoxW = 260;
   const bankX = R - bankBoxW;
   const bankY = infoTop;
-  const bankBoxH = 86; // adjust if you add more lines
+  const bankBoxH = 86; // adjust if you add/remove lines
 
   // Panel
   doc.save().roundedRect(bankX, bankY, bankBoxW, bankBoxH, 10).fill('#F9FAFB').restore();
@@ -125,7 +129,7 @@ export async function buildInvoicePdfBuffer(q = {}) {
   doc.font('Helvetica-Bold').fontSize(9.5).fillColor(ink)
      .text('Banking Details', bankX + 12, bankY + 8, { width: bankBoxW - 24 });
 
-  // Details (stay inside the box)
+  // Details
   doc.font('Helvetica').fontSize(8.5).fillColor(ink);
   const rowX = bankX + 12, rowW = bankBoxW - 24, rowStartY = bankY + 26;
   doc.text('Umojanet (Pty) Ltd t/a Voipshop', rowX, rowStartY, { width: rowW });
@@ -136,7 +140,7 @@ export async function buildInvoicePdfBuffer(q = {}) {
 
   const rightColumnBottom = bankY + bankBoxH;
 
-  // Left column: Company + Bill To (aligned to the same top as the bank box)
+  // Left column: Company + Bill To (aligned to same safe top)
   const gutter = 12;
   const leftW  = W - bankBoxW - gutter;
 
@@ -164,11 +168,9 @@ export async function buildInvoicePdfBuffer(q = {}) {
     .text(q.client?.phone || '',   L, undefined, { width: leftW })
     .text(q.client?.address || '', L, undefined, { width: leftW });
 
-  // Advance below whichever column (left or bank panel) is taller
+  // Advance below whichever column is taller
   doc.y = Math.max(doc.y, rightColumnBottom) + 12;
 }
-
-
   // Totals math
   const vatRate = Number(q.company?.vatRate ?? 0.15);
   const onceSub = Number(q.subtotals?.onceOff || 0);

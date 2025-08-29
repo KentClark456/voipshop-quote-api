@@ -21,14 +21,18 @@ export async function buildSlaPdfBuffer(params = {}) {
     // VAT / pricing
     vatRate = 0.15,
 
-    // lines for Services Ordered
+    // Primary inputs (but we’ll also sniff checkout/cart below)
     services = [],
     itemsMonthly = [],
     minutesIncluded = 0,
 
     // Debit order prefill
     debitOrder = {},
-    serviceDescription = 'Hosted PBX incl. porting, provisioning & remote support'
+    serviceDescription = 'Hosted PBX incl. porting, provisioning & remote support',
+
+    // Optional checkout/cart shapes we’ll normalize from
+    checkout = {},
+    cart = {}
   } = params;
 
   // ---- Palette ----
@@ -68,22 +72,42 @@ export async function buildSlaPdfBuffer(params = {}) {
       .text(rightText, L, yFooter, { width: W, align: 'right' });
   };
 
-  // ---- Header helper (title left, logo right) ----
+  // ---- Header helper (title left; logo right only on Page 1) ----
   const newPageWithHeader = async (title, {
-    subtitle = 'Effective from signing date • Confidential'
+    subtitle = 'Effective from signing date • Confidential',
+    showLogo = true,         // << control logo on this page
   } = {}) => {
-    if (doc.page && doc.page.number > 1) doc.addPage();
-    y = await drawLogoHeader(doc, {
-      logoUrl: company?.logoUrl || '',
-      localLogoHints: [ LOCAL_LOGO ],
-      align: 'right',
-      title,
-      subtitle,
-      maxLogoWidth: 130,
-      top: 18
-    });
-    y = Math.max(y, 70);
-    doc.y = y;
+    if (doc.page && doc.page.number >= 1) {
+      // For first call (page 1), number is 1 and we do NOT add a page.
+      // For subsequent pages, add a page.
+      if (doc.page.number > 1 || title !== 'Service Level Agreement') doc.addPage();
+    }
+
+    if (showLogo) {
+      // Use the branding helper with logo
+      y = await drawLogoHeader(doc, {
+        logoUrl: company?.logoUrl || '',
+        localLogoHints: [ LOCAL_LOGO ],
+        align: 'right',
+        title,
+        subtitle,
+        maxLogoWidth: 130,
+        top: 18
+      });
+      y = Math.max(y, 70);
+      doc.y = y;
+    } else {
+      // Minimal header (no logo)
+      const topPad = 18;
+      doc.font('Helvetica-Bold').fontSize(16).fillColor(INK)
+         .text(title, L, topPad, { width: W, align: 'left' });
+      if (subtitle) {
+        doc.font('Helvetica').fontSize(9).fillColor(MUTED)
+           .text(subtitle, L, doc.y + 2, { width: W, align: 'left' });
+      }
+      y = Math.max(doc.y + 10, 70);
+      doc.y = y;
+    }
   };
 
   // ---------- Card helpers ----------
@@ -119,8 +143,9 @@ export async function buildSlaPdfBuffer(params = {}) {
     const innerPad = 12, headerH = 18, colGap = 18;
     const cardTop = y, x0 = L, w0 = W;
 
-    const titleX = x0 + innerPad, titleY = cardTop + 8;
-    doc.font('Helvetica-Bold').fontSize(10).fillColor(INK).text(cardTitle, titleX, titleY, { width: w0 - innerPad * 2 });
+    const titleX = x0 + innerPad;
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(INK)
+       .text(cardTitle, titleX, cardTop + 8, { width: w0 - innerPad * 2 });
 
     const innerLeft = x0 + innerPad, innerTop = cardTop + headerH + 6;
     const colsW = w0 - innerPad * 2 - colGap;
@@ -178,15 +203,26 @@ export async function buildSlaPdfBuffer(params = {}) {
     doc.y = cardTop + hCard + 12; y = doc.y;
   };
 
-  // ---- Services derive (ALWAYS from itemsMonthly + minutesIncluded) ----
+  // ---- Services derive (pull from checkout/cart/services) ----
   const deriveServices = () => {
-    const items = Array.isArray(itemsMonthly) ? itemsMonthly : [];
-    if (!items.length) return Array.isArray(services) ? services : [];
+    // Try the most likely monthly arrays first
+    const candidates = [
+      itemsMonthly,
+      checkout?.itemsMonthly,
+      checkout?.monthly,
+      checkout?.items,
+      cart?.itemsMonthly,
+      cart?.monthly,
+      cart?.items,
+      services
+    ].filter(Array.isArray);
+
+    const items = candidates.find(a => a && a.length) || [];
 
     const globMin = Number(minutesIncluded || 0);
     const num = (v) => (Number.isFinite(Number(v ?? 0)) ? Number(v) : 0);
 
-    // Pick first numeric from a list of candidate keys; if a key exists but is non-numeric, treat as 0
+    // Pick the first numeric value from candidate keys (treat present-but-non-numeric as 0)
     const pickNum = (obj, keys = []) => {
       for (const k of keys) {
         if (obj && (k in obj)) {
@@ -198,26 +234,29 @@ export async function buildSlaPdfBuffer(params = {}) {
     };
 
     return items.map((it = {}) => {
-      const name = String(it?.name || it?.title || it?.description || it?.sku || '').trim();
+      const name = String(it?.name || it?.title || it?.description || it?.sku || it?.product || '').trim();
 
       // Minutes detection
       const looksLikeCalls = /call|min(ute)?s?/i.test(name);
-      const mins = pickNum(it, ['minutes', 'minutesIncluded', 'includedMinutes', 'qtyMinutes', 'qty_min', 'qtyMin', 'bundleMinutes']) || (looksLikeCalls ? globMin : 0);
-      const note = looksLikeCalls && mins > 0 ? `Includes ${mins} minutes` : (String(it?.note || '').trim());
+      const mins = pickNum(it, [
+        'minutes', 'minutesIncluded', 'includedMinutes',
+        'qtyMinutes', 'qty_min', 'qtyMin', 'bundleMinutes'
+      ]) || (looksLikeCalls ? globMin : 0);
+      const note = (looksLikeCalls && mins > 0)
+        ? `Includes ${mins} minutes`
+        : String(it?.note || it?.notes || '').trim();
 
       // Unit price (prefer ex-VAT monthly)
       let unitPrice = pickNum(it, [
         'unit', 'unitPrice', 'unit_ex_vat', 'unitExVat', 'unit_price', 'unitPriceExVat',
         'unitMonthly', 'monthlyExVat', 'monthly', 'priceMonthly', 'amountMonthly',
-        'perMonth', 'price_ex_vat', 'priceExVat', 'price'
+        'perMonth', 'price_ex_vat', 'priceExVat', 'price', 'amount', 'net'
       ]);
-
-      // Support cents field explicitly if provided
       const unitCents = pickNum(it, ['unitCents', 'unit_cents', 'priceCents', 'price_cents']);
       if (!unitPrice && unitCents) unitPrice = unitCents / 100;
 
       // Quantity
-      let qty = pickNum(it, ['qty', 'quantity', 'count', 'devices']);
+      let qty = pickNum(it, ['qty', 'quantity', 'count', 'devices', 'units']);
       if (!qty || qty <= 0) qty = 1;
 
       return { name, qty, unitPrice, note };
@@ -230,7 +269,8 @@ export async function buildSlaPdfBuffer(params = {}) {
   // PAGE 1 — Parties + Services Ordered
   // =========================
   await newPageWithHeader('Service Level Agreement', {
-    subtitle: `Effective from ${effectiveDateISO} • Notice period ${noticeDays} days`
+    subtitle: `Effective from ${effectiveDateISO} • Notice period ${noticeDays} days`,
+    showLogo: true
   });
 
   // Blue strip with SLA number (Page 1 only)
@@ -285,7 +325,7 @@ export async function buildSlaPdfBuffer(params = {}) {
     const rows = Array.isArray(svc) ? svc : [];
     if (!rows.length) {
       doc.font('Helvetica').fontSize(7.8).fillColor(MUTED)
-        .text('No monthly service lines were supplied. (Pass `itemsMonthly` + `minutesIncluded`.)', x, y, { width: w });
+        .text('No monthly service lines were supplied. (Provide `itemsMonthly` or `checkout.itemsMonthly` etc.)', x, y, { width: w });
       moveY(10);
       return;
     }
@@ -295,8 +335,8 @@ export async function buildSlaPdfBuffer(params = {}) {
     let subtotal = 0;
 
     for (const it of rows) {
-      // Stop if no space for another row + totals
-      if (!hasSpace(rowH + 40)) break;
+      // Stop if no space for another row + totals (leave room for totals line)
+      if (!hasSpace(rowH + 42)) break;
 
       const unit = Number(it.unitPrice) || 0;
       const qty = Number(it.qty) || 0;
@@ -339,51 +379,81 @@ export async function buildSlaPdfBuffer(params = {}) {
     line('Monthly Total (incl VAT)', total, true);
   }, { minHeight: 72 });
 
-  // Response Time & Downtime Policy
+  // Response Time & Downtime Policy (compact, 2-column table)
   drawCard('Response Time & Downtime Policy', ({ x, w }) => {
-    const maxW = w;
-    const lh = 9;
-    const heading = (t) => {
-      doc.font('Helvetica-Bold').fontSize(8.4).fillColor(INK).text(t, x, y, { width: maxW });
-      moveY(8);
+    // Grid layout: two equal columns
+    const colGap = 18;
+    const colW = (w - colGap) / 2;
+    const leftX = x;
+    const rightX = x + colW + colGap;
+
+    const table = (tx, tw) => {
+      const rowH = 12;
+      const headH = 13;
+
+      // Header row
+      doc.save().rect(tx, y, tw, headH).fill(BG).restore();
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(INK);
+      doc.text('Priority', tx + 6, y + 2, { width: tw * 0.32 - 8 });
+      doc.text('Response', tx + tw * 0.32, y + 2, { width: tw * 0.34 - 6, align: 'center' });
+      doc.text('Restore Target', tx + tw * 0.66, y + 2, { width: tw * 0.34 - 6, align: 'right' });
+      moveY(headH);
+      doc.moveTo(tx, y).lineTo(tx + tw, y).strokeColor('#E5E7EB').lineWidth(1).stroke();
+
+      const rows = [
+        ['P1 Outage',      '≤ 2 business hours', '≤ 8 hours'],
+        ['P2 Major fault', '≤ 4 business hours', '≤ 1 business day'],
+        ['P3 / MAC',       '≤ 1 business day',   '2–3 business days'],
+      ];
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED);
+      for (const r of rows) {
+        if (!hasSpace(rowH + 6)) break;
+        doc.text(r[0], tx + 6, y + 2, { width: tw * 0.32 - 8 });
+        doc.text(r[1], tx + tw * 0.32, y + 2, { width: tw * 0.34 - 6, align: 'center' });
+        doc.text(r[2], tx + tw * 0.66, y + 2, { width: tw * 0.34 - 6, align: 'right' });
+        moveY(rowH);
+        doc.moveTo(tx, y).lineTo(tx + tw, y).strokeColor('#F0F0F0').lineWidth(1).stroke();
+      }
     };
-    const bullet = (t) => {
-      const dotW = 10;
-      doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('•', x, y, { width: dotW, align: 'center' });
-      doc.text(t, x + dotW, y, { width: maxW - dotW, lineGap: 0.2 });
-      const h = doc.heightOfString(t, { width: maxW - dotW, lineGap: 0.2 });
-      moveY(Math.max(lh, h));
+
+    // Left table: Priorities
+    table(leftX, colW);
+
+    // Right column: compact bullets (Availability/Maintenance/Scope)
+    const bullet = (txt) => {
+      const dotW = 9;
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED)
+         .text('•', rightX, y, { width: dotW, align: 'center' });
+      doc.text(txt, rightX + dotW, y, { width: colW - dotW, lineGap: 0.1 });
+      const h = doc.heightOfString(txt, { width: colW - dotW, lineGap: 0.1 });
+      moveY(Math.max(10, h + 1));
     };
 
-    // Compact content (≤ ~2/5 page)
-    heading('Support Method');
-    bullet('Remote support is the primary channel for all requests (setup, programming, troubleshooting, call quality).');
-    bullet('Onsite call-outs are used only if remote resolution is not possible and are billed at the standard call-out rate (travel/after-hours may apply).');
+    // Start the right column near the same vertical as left header
+    const topY = doc.y;
+    const saveY = topY - 48;
+    doc.y = Math.max(saveY, topY - 40); y = doc.y;
 
-    moveY(4);
-    heading('Response Times');
-    bullet('Critical faults (system down, no inbound/outbound calls): remote response within 2 business hours.');
-    bullet('High priority (multiple users affected / severe degradation): within 4 business hours.');
-    bullet('Standard issues (single user / changes / feature queries): within 1 business day.');
-    bullet('Onsite call-outs: scheduled within 24–48 business hours, subject to technician availability (emergency call-outs may be arranged at premium rates if resources allow).');
-
-    moveY(4);
-    heading('Availability & Maintenance');
+    doc.font('Helvetica-Bold').fontSize(8.2).fillColor(INK)
+       .text('Availability & Maintenance', rightX, y, { width: colW });
+    moveY(8);
     bullet('Hosted PBX platform target availability: 99.5% per calendar month.');
-    bullet('Planned maintenance will be communicated at least 48 hours in advance and scheduled after-hours where reasonably possible.');
+    bullet('Planned maintenance communicated ≥ 48 hours in advance and scheduled after-hours where feasible.');
 
-    moveY(4);
-    heading('Exclusions');
-    bullet('Customer-owned equipment, cabling, Wi-Fi/LAN, or on-prem network issues.');
-    bullet('Power outages at customer premises or areas, and local internet connectivity unrelated to Darkwire’s network.');
-    bullet('Third-party carrier/upstream provider outages or force majeure events.');
-    bullet('Delays due to customer unavailability for remote sessions or scheduled onsite visits.');
+    moveY(2);
+    doc.font('Helvetica-Bold').fontSize(8.2).fillColor(INK)
+       .text('Scope & Exclusions', rightX, y, { width: colW });
+    moveY(8);
+    bullet('Remote support is primary. Onsite only if remote resolution is not possible (call-out fees may apply).');
+    bullet('Excludes: customer LAN/Wi-Fi/cabling, premises power, local ISP faults, third-party carrier outages, force majeure.');
+    bullet('Customer availability required for sessions/onsite scheduling.');
 
-    moveY(4);
-    heading('Escalation');
-    bullet('If an issue cannot be resolved remotely within the stated response time, it will be escalated to an onsite call-out (fees apply).');
-    bullet('Progress updates will be communicated throughout until resolution.');
-  }, { minHeight: 110 });
+    moveY(2);
+    doc.font('Helvetica-Bold').fontSize(8.2).fillColor(INK)
+       .text('Escalation', rightX, y, { width: colW });
+    moveY(8);
+    bullet('If not resolved within targets, escalate to onsite (fees apply). Progress updates provided until resolution.');
+  }, { minHeight: 96, headerH: 18, gapAfter: 8 });
 
   // Footer Page 1 (with Agreement No)
   footer(1, true);
@@ -391,7 +461,7 @@ export async function buildSlaPdfBuffer(params = {}) {
   // =========================
   // PAGE 2 — Debit Order Mandate + T&Cs
   // =========================
-  await newPageWithHeader('Debit Order Mandate', { subtitle: '' });
+  await newPageWithHeader('Debit Order Mandate', { subtitle: '', showLogo: false });
 
   drawCard('Debit Order Mandate (Fill In)', (box) => {
     const labelW = 140;
@@ -473,9 +543,9 @@ export async function buildSlaPdfBuffer(params = {}) {
     const paras = [
       'This signed Authority and Mandate refers to our contract dated: (“the Agreement”).',
       '',
-      'I / We hereby authorise you to issue and deliver payment instructions to your Banker for collection against my / our abovementioned account at my / Our above-mentioned Bank (or any other bank or branch to which I / we may transfer my / our account) on condition that the sum of such payment instructions will never exceed my / our obligations as agreed to in the Agreement and commencing on_________ and continuing until this Authority and Mandate is terminated by me / us by giving you notice in writing of not less than 20 ordinary working days, and sent by prepaid registered post or delivered to your address as indicated above.',
+      'I / We hereby authorise you to issue and deliver payment instructions to your Banker for collection against my / our abovementioned account at my / Our above-mentioned Bank (or any other bank or branch to which I / we may transfer my / our account) on condition that the sum of such payment instructions will never exceed my / our obligations as agreed to in the Agreement and continuing until this Authority and Mandate is terminated by me / us by giving you notice in writing of not less than 20 ordinary working days, and sent by prepaid registered post or delivered to your address as indicated above.',
       '',
-      'The individual payment instructions so authorised to be issued must be issued and delivered as follows: monthly. In the event that the payment day falls on a Sunday, or recognised South African public holiday, the payment day will automatically be the preceding ordinary business day. Payment Instructions due in December may be debited against my account on ____________',
+      'The individual payment instructions so authorised to be issued must be issued and delivered as follows: monthly. In the event that the payment day falls on a Sunday, or recognised South African public holiday, the payment day will automatically be the preceding ordinary business day. Payment Instructions due in December may be debited against my account as per the agreement',
       '',
       'I / We understand that the withdrawals hereby authorized will be processed through a computerized system provided by the South African Banks and I also understand that details of each withdrawal will be printed on my bank statement. Each transaction will contain a number, which must be included in the said payment instruction and if provided to you should enable you to identify the Agreement. A payment reference is added to this form before the issuing of any payment instruction.',
       '',
@@ -523,7 +593,7 @@ export async function buildSlaPdfBuffer(params = {}) {
   // =========================
   // PAGE 3 — General Terms & Conditions
   // =========================
-  await newPageWithHeader('Terms & Conditions', { subtitle: '' });
+  await newPageWithHeader('Terms & Conditions', { subtitle: '', showLogo: false });
 
   // Two-column layout
   const COL_GAP = 22;
@@ -571,7 +641,7 @@ export async function buildSlaPdfBuffer(params = {}) {
     return true;
   };
 
-  // NOTE: "Support & Service Levels" REMOVED (now on Page 1)
+  // NOTE: "Support & Service Levels" lives on Page 1 now
   const sections = [
     {
       title: 'Fees, Billing & Payments',
@@ -684,4 +754,3 @@ export async function buildSlaPdfBuffer(params = {}) {
   doc.end();
   return await done;
 }
-
