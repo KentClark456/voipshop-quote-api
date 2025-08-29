@@ -126,44 +126,56 @@ export async function buildQuotePdfBuffer(q = {}) {
      .text(q.client?.phone || '', L, undefined, { width: W })
      .text(q.client?.address || '', L, undefined, { width: W });
 
-  // ---- WHY CHOOSE US (benefits first)
-  if (ensureSpace(90)) {
-    const cardY = doc.y + 10;
-    const cardHmin = 60;
-    const pad = 10;
-    const bullet = (t) => {
-      const x = L + pad + 8;
-      const y = doc.y;
-      doc.circle(L + pad + 2.5, y + 4, 1.4).fill(gray6);
-      doc.fillColor(ink).font('Helvetica').fontSize(9.5)
-         .text(t, x, y, { width: W - pad * 2 - 12, lineGap: 1.0 });
-      doc.fillColor(ink);
-      doc.y += 6;
-    };
+// ---- WHY CHOOSE US (benefits first)
+if (ensureSpace(90)) {
+  const cardYStart = doc.y + 10;   // where the card begins
+  const pad = 10;
 
-    // Card frame
-    doc.save().roundedRect(L, cardY, W, Math.max(cardHmin, 0), 10).fill(pill).restore();
-    doc.roundedRect(L, cardY, W, Math.max(cardHmin, 0), 10).strokeColor(line).stroke();
+  // Title
+  doc.font('Helvetica-Bold').fontSize(11).fillColor(ink)
+     .text('Why choose VoIP Shop', L + pad, cardYStart + 8, { width: W - pad * 2 });
 
-    // Title
-    doc.font('Helvetica-Bold').fontSize(11).fillColor(ink)
-       .text('Why choose VoIP Shop', L + pad, cardY + 8, { width: W - pad * 2 });
-    doc.y = cardY + 28;
+  // Bullets helper
+  const bullet = (t) => {
+    const x = L + pad + 10;               // text start
+    const cy = doc.y + 4;                 // circle center (baseline-ish)
+    // dot
+    doc.save()
+       .circle(L + pad + 2.5, cy, 1.4)
+       .fill(gray6)
+       .restore();
+    // text
+    doc.fillColor(ink).font('Helvetica').fontSize(9.5)
+       .text(t, x, doc.y, { width: W - pad * 2 - 12, lineGap: 1 });
+    // small spacer between bullets
+    doc.y += 4;
+  };
 
-    // Bullets (phrased per your notes)
-    bullet('Buy direct—no sales commissions baked into hardware pricing.');
-    bullet('Own your equipment outright; insure it with your provider at the correct replacement value.');
-    bullet('Avoid finance charges by purchasing equipment upfront through VoIP Shop.');
-    bullet('Get help from a support-led team focused on uptime, not sales targets.');
+  // Move below the title line before bullets
+  doc.y = cardYStart + 28;
 
-    // Snap the card height to content
-    const cardBottom = doc.y + 6;
-    const h = Math.max(cardHmin, cardBottom - cardY);
-    doc.save().roundedRect(L, cardY, W, h, 10).strokeColor(line).stroke().restore();
+  // Bullets (no background fill; we’ll draw the border afterwards)
+  bullet('Buy direct—no sales commissions baked into hardware pricing.');
+  bullet('Own your equipment outright; insure it with your provider at the correct replacement value.');
+  bullet('Avoid finance charges by purchasing equipment upfront through VoIP Shop.');
+  bullet('Get help from a support-led team focused on uptime, not sales targets.');
 
-    // Move cursor below card
-    doc.y = cardY + h + 10;
-  }
+  // Compute final card height based on content drawn
+  const contentBottom = doc.y + 6;
+  const cardHeight = Math.max(60, contentBottom - cardYStart);
+
+  // Draw ONLY a stroked frame around everything (title + 4 bullets)
+  doc.save()
+     .roundedRect(L, cardYStart, W, cardHeight, 10)
+     .strokeColor(line)
+     .lineWidth(1)
+     .stroke()
+     .restore();
+
+  // Advance cursor below card
+  doc.y = cardYStart + cardHeight + 10;
+}
+
 
   // Totals (compute once)
   const vatRate = Number(q.company?.vatRate ?? 0.15);

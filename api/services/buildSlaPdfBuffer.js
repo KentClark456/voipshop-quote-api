@@ -379,81 +379,89 @@ export async function buildSlaPdfBuffer(params = {}) {
     line('Monthly Total (incl VAT)', total, true);
   }, { minHeight: 72 });
 
-  // Response Time & Downtime Policy (compact, 2-column table)
-  drawCard('Response Time & Downtime Policy', ({ x, w }) => {
-    // Grid layout: two equal columns
-    const colGap = 18;
-    const colW = (w - colGap) / 2;
-    const leftX = x;
-    const rightX = x + colW + colGap;
+ // Response Time & Downtime Policy — two clean text columns (no table)
+drawCard('Response Time & Downtime Policy', ({ x, w }) => {
+  const colGap = 18;
+  const colW = (w - colGap) / 2;
+  const leftX = x;
+  const rightX = x + colW + colGap;
 
-    const table = (tx, tw) => {
-      const rowH = 12;
-      const headH = 13;
+  const titleFont = () => doc.font('Helvetica-Bold').fontSize(8.5).fillColor(INK);
+  const bodyFont  = () => doc.font('Helvetica').fontSize(8).fillColor(MUTED);
 
-      // Header row
-      doc.save().rect(tx, y, tw, headH).fill(BG).restore();
-      doc.font('Helvetica-Bold').fontSize(8).fillColor(INK);
-      doc.text('Priority', tx + 6, y + 2, { width: tw * 0.32 - 8 });
-      doc.text('Response', tx + tw * 0.32, y + 2, { width: tw * 0.34 - 6, align: 'center' });
-      doc.text('Restore Target', tx + tw * 0.66, y + 2, { width: tw * 0.34 - 6, align: 'right' });
-      moveY(headH);
-      doc.moveTo(tx, y).lineTo(tx + tw, y).strokeColor('#E5E7EB').lineWidth(1).stroke();
+  // Local column writer that DOES NOT rely on global moveY/hasSpace
+  const writeColumn = (tx, ty, tw, sections) => {
+    let cy = ty;
+    for (const sec of sections) {
+      // Section title
+      titleFont().text(sec.title, tx, cy, { width: tw });
+      const th = doc.heightOfString(sec.title, { width: tw });
+      cy += Math.max(10, th + 2);
 
-      const rows = [
-        ['P1 Outage',      '≤ 2 business hours', '≤ 8 hours'],
-        ['P2 Major fault', '≤ 4 business hours', '≤ 1 business day'],
-        ['P3 / MAC',       '≤ 1 business day',   '2–3 business days'],
-      ];
-      doc.font('Helvetica').fontSize(8).fillColor(MUTED);
-      for (const r of rows) {
-        if (!hasSpace(rowH + 6)) break;
-        doc.text(r[0], tx + 6, y + 2, { width: tw * 0.32 - 8 });
-        doc.text(r[1], tx + tw * 0.32, y + 2, { width: tw * 0.34 - 6, align: 'center' });
-        doc.text(r[2], tx + tw * 0.66, y + 2, { width: tw * 0.34 - 6, align: 'right' });
-        moveY(rowH);
-        doc.moveTo(tx, y).lineTo(tx + tw, y).strokeColor('#F0F0F0').lineWidth(1).stroke();
-      }
-    };
-
-    // Left table: Priorities
-    table(leftX, colW);
-
-    // Right column: compact bullets (Availability/Maintenance/Scope)
-    const bullet = (txt) => {
+      // Bullets
+      bodyFont();
       const dotW = 9;
-      doc.font('Helvetica').fontSize(8).fillColor(MUTED)
-         .text('•', rightX, y, { width: dotW, align: 'center' });
-      doc.text(txt, rightX + dotW, y, { width: colW - dotW, lineGap: 0.1 });
-      const h = doc.heightOfString(txt, { width: colW - dotW, lineGap: 0.1 });
-      moveY(Math.max(10, h + 1));
-    };
+      for (const b of sec.bullets) {
+        // bullet dot
+        doc.text('•', tx, cy, { width: dotW, align: 'center' });
+        // bullet text
+        doc.text(b, tx + dotW, cy, { width: tw - dotW, lineGap: 0.3 });
+        const bh = doc.heightOfString(b, { width: tw - dotW, lineGap: 0.3 });
+        cy += Math.max(10, bh + 2);
+      }
 
-    // Start the right column near the same vertical as left header
-    const topY = doc.y;
-    const saveY = topY - 48;
-    doc.y = Math.max(saveY, topY - 40); y = doc.y;
+      cy += 4; // spacing after section
+    }
+    return cy; // bottom Y
+  };
 
-    doc.font('Helvetica-Bold').fontSize(8.2).fillColor(INK)
-       .text('Availability & Maintenance', rightX, y, { width: colW });
-    moveY(8);
-    bullet('Hosted PBX platform target availability: 99.5% per calendar month.');
-    bullet('Planned maintenance communicated ≥ 48 hours in advance and scheduled after-hours where feasible.');
+  // Keep columns aligned to the same starting Y
+  const startY = y;
 
-    moveY(2);
-    doc.font('Helvetica-Bold').fontSize(8.2).fillColor(INK)
-       .text('Scope & Exclusions', rightX, y, { width: colW });
-    moveY(8);
-    bullet('Remote support is primary. Onsite only if remote resolution is not possible (call-out fees may apply).');
-    bullet('Excludes: customer LAN/Wi-Fi/cabling, premises power, local ISP faults, third-party carrier outages, force majeure.');
-    bullet('Customer availability required for sessions/onsite scheduling.');
+  // LEFT COLUMN
+  const leftSections = [
+    {
+      title: 'Response Targets',
+      bullets: [
+        'P1 Outage: initial response ≤ 2 business hours; restore target ≤ 8 hours.',
+        'P2 Major fault: initial response ≤ 4 business hours; restore target ≤ 1 business day.',
+        'P3 / MAC (moves/adds/changes): response ≤ 1 business day; restore/complete within 2–3 business days.'
+      ]
+    },
+    {
+      title: 'Availability & Maintenance',
+      bullets: [
+        'Hosted PBX platform target availability: 99.5% per calendar month.',
+        'Planned maintenance communicated ≥ 48 hours in advance and scheduled after-hours where feasible.'
+      ]
+    }
+  ];
+  const leftBottom = writeColumn(leftX, startY, colW, leftSections);
 
-    moveY(2);
-    doc.font('Helvetica-Bold').fontSize(8.2).fillColor(INK)
-       .text('Escalation', rightX, y, { width: colW });
-    moveY(8);
-    bullet('If not resolved within targets, escalate to onsite (fees apply). Progress updates provided until resolution.');
-  }, { minHeight: 96, headerH: 18, gapAfter: 8 });
+  // RIGHT COLUMN
+  const rightSections = [
+    {
+      title: 'Scope & Exclusions',
+      bullets: [
+        'Remote support is primary. Onsite only if remote resolution is not possible (call-out fees may apply).',
+        'Excludes: customer LAN/Wi-Fi/cabling, premises power, local ISP faults, third-party carrier outages, and force majeure.',
+        'Customer availability is required for remote sessions and onsite scheduling.'
+      ]
+    },
+    {
+      title: 'Escalation',
+      bullets: [
+        'If not resolved within targets, escalate to onsite (fees may apply).',
+        'Progress updates are provided until resolution.'
+      ]
+    }
+  ];
+  const rightBottom = writeColumn(rightX, startY, colW, rightSections);
+
+  // Advance global y to the lower of the two columns + padding
+  y = Math.max(leftBottom, rightBottom) + 6;
+}, { minHeight: 96, headerH: 18, gapAfter: 8 });
+
 
   // Footer Page 1 (with Agreement No)
   footer(1, true);
