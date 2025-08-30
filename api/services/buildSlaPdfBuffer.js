@@ -46,6 +46,10 @@ export async function buildSlaPdfBuffer(params = {}) {
   const money = (n) =>
     'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+  // ✅ Defaults that mirror checkout bundles
+  const DEFAULT_BUNDLE_SIZE = 250; // minutes per bundle
+  const DEFAULT_BUNDLE_UNIT = 100; // R per bundle (ex VAT)
+
   // ---- PDF init ----
   const doc = new PDFDocument({ size: 'A4', margin: 32 });
   const chunks = [];
@@ -219,16 +223,13 @@ export async function buildSlaPdfBuffer(params = {}) {
 
     const items = candidates.find(a => a && a.length) || [];
 
-    const globMin = Number(minutesIncluded || 0);
     const num = (v) => (Number.isFinite(Number(v ?? 0)) ? Number(v) : 0);
+    const globMin = Number(minutesIncluded || 0);
 
-    // Pick the first numeric value from candidate keys (treat present-but-non-numeric as 0)
+    // Helper: pick first numeric value from a list of keys
     const pickNum = (obj, keys = []) => {
       for (const k of keys) {
-        if (obj && (k in obj)) {
-          const n = num(obj[k]);
-          return n;
-        }
+        if (obj && (k in obj)) return num(obj[k]);
       }
       return 0;
     };
@@ -236,30 +237,39 @@ export async function buildSlaPdfBuffer(params = {}) {
     return items.map((it = {}) => {
       const name = String(it?.name || it?.title || it?.description || it?.sku || it?.product || '').trim();
 
-      // Minutes detection
-      const looksLikeCalls = /call|min(ute)?s?/i.test(name);
-      const mins = pickNum(it, [
-        'minutes', 'minutesIncluded', 'includedMinutes',
-        'qtyMinutes', 'qty_min', 'qtyMin', 'bundleMinutes'
-      ]) || (looksLikeCalls ? globMin : 0);
-      const note = (looksLikeCalls && mins > 0)
-        ? `Includes ${mins} minutes`
-        : String(it?.note || it?.notes || '').trim();
+      // Detect a Calls/minutes line
+      const isCalls =
+        Boolean(it?.isCalls) ||
+        /\bcalls?\b/i.test(name) ||
+        /min(ute)?s?/i.test(name);
 
-      // Unit price (prefer ex-VAT monthly)
-      let unitPrice = pickNum(it, [
-        'unit', 'unitPrice', 'unit_ex_vat', 'unitExVat', 'unit_price', 'unitPriceExVat',
-        'unitMonthly', 'monthlyExVat', 'monthly', 'priceMonthly', 'amountMonthly',
-        'perMonth', 'price_ex_vat', 'priceExVat', 'price', 'amount', 'net'
-      ]);
-      const unitCents = pickNum(it, ['unitCents', 'unit_cents', 'priceCents', 'price_cents']);
-      if (!unitPrice && unitCents) unitPrice = unitCents / 100;
+      // Quantity (units/bundles)
+      const qty = Math.max(1, pickNum(it, ['qty', 'quantity', 'count', 'devices', 'units']) || 1);
 
-      // Quantity
-      let qty = pickNum(it, ['qty', 'quantity', 'count', 'devices', 'units']);
-      if (!qty || qty <= 0) qty = 1;
+      // Bundle size (calls)
+      const bundleSize = isCalls ? (pickNum(it, ['bundleSize']) || DEFAULT_BUNDLE_SIZE) : 0;
 
-      return { name, qty, unitPrice, note };
+      // Minutes: explicit -> qty*bundleSize -> global fallback
+      let minutes = isCalls
+        ? (pickNum(it, ['minutes', 'minutesIncluded', 'includedMinutes', 'qtyMinutes', 'qty_min', 'qtyMin', 'bundleMinutes']) ||
+           (qty * bundleSize) ||
+           globMin)
+        : 0;
+
+      // Unit price (prefer explicit; fallback for Calls)
+      let unitPrice =
+        pickNum(it, [
+          'unit', 'unitPrice', 'unit_ex_vat', 'unitExVat', 'unit_price', 'unitPriceExVat',
+          'unitMonthly', 'monthlyExVat', 'monthly', 'priceMonthly', 'amountMonthly',
+          'perMonth', 'price_ex_vat', 'priceExVat', 'price', 'amount', 'net'
+        ]);
+      if (isCalls && unitPrice <= 0) unitPrice = DEFAULT_BUNDLE_UNIT;
+
+      // Note / marker for downstream linking
+      const baseNote = String(it?.note || it?.notes || '').trim();
+      const note = isCalls ? `MINUTES: ${minutes}` : baseNote;
+
+      return { name, qty, unitPrice, note, isCalls, minutes, bundleSize };
     });
   };
 
@@ -339,22 +349,54 @@ export async function buildSlaPdfBuffer(params = {}) {
       if (!hasSpace(rowH + 42)) break;
 
       const unit = Number(it.unitPrice) || 0;
-      const qty = Number(it.qty) || 0;
-      const lineTotal = unit * qty;
+      const qty  = Number(it.qty) || 0;
+
+      // Minute/PAYG logic (no layout changes)
+      const nameLower  = String(it.name || '').toLowerCase();
+      const isCalls    = !!it.isCalls;
+      const minutes    = Number(it.minutes || 0);
+      const bundleSize = Number(it.bundleSize || DEFAULT_BUNDLE_SIZE);
+
+      // PAYG if explicitly named or no minutes/qty provided
+      const isPayg = isCalls && (
+        /pay[-\s]?as[-\s]?you[-\s]?go/.test(nameLower) ||
+        minutes <= 0 ||
+        qty <= 0
+      );
+
+      // Compute values to display
+      let qtyCell, unitCell, lineTotal, desc;
+      if (isCalls) {
+        const minsForRow = isPayg ? 0 : minutes;
+        const bundles    = (bundleSize > 0) ? (minsForRow / bundleSize) : 0;
+
+        // Qty shows minutes; Unit cell shows price per bundle with bundle size
+        qtyCell   = String(minsForRow || 0);
+        unitCell  = isPayg ? 'minutes' : `${money(unit)} / ${bundleSize}m`;
+        lineTotal = isPayg ? 0 : (unit * bundles);
+        desc      = minsForRow ? `${it.name} — ${minsForRow} minutes` : `${it.name} — Pay-as-you-go`;
+      } else {
+        qtyCell   = String(qty || 0);
+        unitCell  = unit > 0 ? money(unit) : '—';
+        lineTotal = unit * qty;
+        desc      = it.name || '';
+      }
+
       subtotal += Number.isFinite(lineTotal) ? lineTotal : 0;
 
-      doc.text(it.name || '',                rx[0], y, { width: cW[0] });
-      doc.text(String(qty || 0),             rx[1], y, { width: cW[1], align: 'right' });
-      doc.text(unit > 0 ? money(unit) : '—', rx[2], y, { width: cW[2], align: 'right' });
-      doc.text(money(lineTotal),             rx[3], y, { width: cW[3], align: 'right' });
+      doc.text(desc,                     rx[0], y, { width: cW[0] });
+      doc.text(qtyCell,                  rx[1], y, { width: cW[1], align: 'right' });
+      doc.text(unitCell,                 rx[2], y, { width: cW[2], align: 'right' });
+      doc.text(money(lineTotal),         rx[3], y, { width: cW[3], align: 'right' });
       moveY(rowH);
 
       if (it.note) {
-        const noteH = doc.heightOfString(it.note, { width: cW[0], lineGap: 0.1 });
+        const noteText = String(it.note);
+        const noteH = doc.heightOfString(noteText, { width: cW[0], lineGap: 0.2 });
         doc.font('Helvetica-Oblique').fillColor(MUTED)
-           .text(it.note, rx[0], y - 1, { width: cW[0], lineGap: 0.1 });
+           .text(noteText, rx[0], y, { width: cW[0], lineGap: 0.2 });
         doc.font('Helvetica').fillColor(MUTED);
-        moveY(Math.min(6, noteH));
+        moveY(Math.max(8, Math.min(12, noteH + 2)));
       }
     }
 

@@ -241,114 +241,132 @@ const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
   doc.moveTo(L, y + headH).lineTo(R, y + headH).strokeColor(line).stroke();
   y += headH + 1;
 
-  // ... keep the rest of your function identical ...
+  // Body
+  doc.font('Helvetica').fontSize(9).fillColor(ink);
+  const zebra = ['#ffffff', '#fbfdff'];
+  let rowIndex = 0;
+  let hiddenCount = 0;
 
+  const safeGlobalMinutes = Number.isFinite(Number(globalMinutes)) ? Number(globalMinutes) : 0;
 
-    // Body
-    doc.font('Helvetica').fontSize(9).fillColor(ink);
-    const zebra = ['#ffffff', '#fbfdff'];
-    let rowIndex = 0;
-    let hiddenCount = 0;
+  const itemsArr = Array.isArray(items) ? items : [];
+  for (let i = 0; i < itemsArr.length; i++) {
+    // Need space for at least 1 row + totals later
+    if (!ensureSpace(110, y)) { hiddenCount = itemsArr.length - i; break; } // slightly lower reserve than before
 
-    const safeGlobalMinutes = Number.isFinite(Number(globalMinutes)) ? Number(globalMinutes) : 0;
+    const it = itemsArr[i] || {};
+    const name = typeof it.name === 'string' ? it.name : String(it.name ?? '');
+    const nameLower = name.toLowerCase();
 
-    const itemsArr = Array.isArray(items) ? items : [];
-    for (let i = 0; i < itemsArr.length; i++) {
-      // Need space for at least 1 row + totals later
-      if (!ensureSpace(110, y)) { hiddenCount = itemsArr.length - i; break; } // slightly lower reserve than before
+    const unitRaw = Number(it.unit);
+    const qtyRaw  = Number(it.qty);
 
-      const it = itemsArr[i] || {};
-      const name = typeof it.name === 'string' ? it.name : String(it.name ?? '');
+    // Detect calls/minutes line
+    const looksLikeCalls =
+      Boolean(it.isCalls) ||
+      /(?:^|\b)(?:calls?|minutes?|bundle)\b/i.test(name);
 
-      const unitRaw = Number(it.unit);
-      const qtyRaw  = Number(it.qty);
+    // Read minutes from tags first
+    const minuteCandidates = [
+      it.minutes, it.qtyMinutes, it.minutesIncluded, it.includedMinutes,
+      it.qty_min, it.qty_mins, it.qtyMin, it.qtyMins, it.bundleMinutes
+    ];
+    let itemMinutes = minuteCandidates
+      .map(n => Number(n))
+      .find(n => Number.isFinite(n) && n > 0) || 0;
 
-      const looksLikeCalls = /(?:^|\b)(?:calls?|minutes?|bundle)\b/i.test(name);
+    // If still not present, try parsing from the name
+    if (!itemMinutes) {
+      const m = name.match(/(\d{2,5})\s*(?:mins?|minutes?)\b/i)
+             || name.match(/\bbundle\s*(\d{2,5})\b/i)
+             || name.match(/\bx\s*(\d{2,5})\b/i);
+      if (m && Number(m[1]) > 0) itemMinutes = Number(m[1]);
+    }
 
-      const minuteCandidates = [
-        it.minutes, it.qtyMinutes, it.minutesIncluded, it.includedMinutes,
-        it.qty_min, it.qty_mins, it.qtyMin, it.qtyMins
-      ];
-      let itemMinutes = minuteCandidates
-        .map(n => Number(n))
-        .find(n => Number.isFinite(n) && n > 0) || 0;
+    // Final minutes value per row
+    const minutesForRow = itemMinutes > 0 ? itemMinutes : (looksLikeCalls ? safeGlobalMinutes : 0);
 
-      if (!itemMinutes) {
-        const m = name.match(/(\d{2,5})\s*(?:mins?|minutes?)\b/i)
-               || name.match(/\bbundle\s*(\d{2,5})\b/i)
-               || name.match(/\bx\s*(\d{2,5})\b/i);
-        if (m && Number(m[1]) > 0) itemMinutes = Number(m[1]);
-      }
+    // PAYG detection → force 0 minutes and R0
+    const isPayg = looksLikeCalls && (
+      /pay[-\s]?as[-\s]?you[-\s]?go/i.test(nameLower) ||
+      Number(minutesForRow) <= 0 ||
+      Number(qtyRaw) <= 0
+    );
 
-      const minutesForRow = itemMinutes > 0 ? itemMinutes : (looksLikeCalls ? safeGlobalMinutes : 0);
-      const isMinutesBundle = !!(monthly && minutesForRow > 0);
+    // For calls with minutes, show minutes as the Qty and "minutes" as Unit
+    const isMinutesBundle = !!(monthly && looksLikeCalls && !isPayg && minutesForRow > 0);
 
-      const qtyVal = isMinutesBundle
-        ? minutesForRow
+    // Compute Qty/Unit/Amount
+    const qtyVal = isMinutesBundle
+      ? minutesForRow
+      : isPayg
+        ? 0
         : (Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1);
 
-      const unitDisplay = isMinutesBundle
-        ? 'minutes'
-        : money(Number.isFinite(unitRaw) ? unitRaw : 0);
+    const unitDisplay = (isMinutesBundle || isPayg)
+      ? 'minutes'
+      : money(Number.isFinite(unitRaw) ? unitRaw : 0);
 
-      let amount = 0;
-      if (isMinutesBundle) {
-        const bundleSize = Number(it.bundleSize || q?.meta?.bundleSize || 250);
-        const bundles = (Number.isFinite(bundleSize) && bundleSize > 0) ? (minutesForRow / bundleSize) : 0;
-        amount = (Number.isFinite(unitRaw) ? unitRaw : 0) * bundles;
-      } else {
-        amount = (Number.isFinite(unitRaw) ? unitRaw : 0) * qtyVal;
-      }
-      if (!Number.isFinite(amount)) amount = 0;
-
-      // Row bg
-      doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
-      rowIndex++;
-
-      const rowTextY = y + 3;
-      doc.text(name,                L + 8,                       rowTextY, { width: colW[0] - 10 });
-      doc.text(String(qtyVal || 0), L + colW[0],                 rowTextY, { width: colW[1], align: 'right' });
-      doc.text(unitDisplay,         L + colW[0] + colW[1],       rowTextY, { width: colW[2], align: 'right' });
-      doc.text(money(amount),       L + colW[0] + colW[1] + colW[2], rowTextY, { width: colW[3], align: 'right' });
-
-      y += rowH;
+    let amount = 0;
+    if (isMinutesBundle) {
+      const bundleSize = Number(it.bundleSize || q?.meta?.bundleSize || 250);
+      const bundles = (Number.isFinite(bundleSize) && bundleSize > 0) ? (minutesForRow / bundleSize) : 0;
+      amount = (Number.isFinite(unitRaw) ? unitRaw : 0) * bundles;
+    } else if (isPayg) {
+      amount = 0;
+    } else {
+      amount = (Number.isFinite(unitRaw) ? unitRaw : 0) * qtyVal;
     }
+    if (!Number.isFinite(amount)) amount = 0;
 
-    // Hidden rows notice
-    if (hiddenCount > 0 && ensureSpace(rowH + 36, y)) {
-      doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
-      doc.font('Helvetica-Oblique').fontSize(9).fillColor(gray6)
-        .text(`+ ${hiddenCount} more item${hiddenCount > 1 ? 's' : ''} included in totals`,
-              L + 8, y + 3, { width: W - 16 });
-      y += rowH;
-    }
+    // Row bg
+    doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
+    rowIndex++;
 
-    // Totals
-    if (ensureSpace(50, y)) {
-      doc.moveTo(L, y).lineTo(R, y).strokeColor(line).stroke();
-      y += 6;
+    const rowTextY = y + 3;
+    doc.text(name,                L + 8,                       rowTextY, { width: colW[0] - 10 });
+    doc.text(String(qtyVal || 0), L + colW[0],                 rowTextY, { width: colW[1], align: 'right' });
+    doc.text(unitDisplay,         L + colW[0] + colW[1],       rowTextY, { width: colW[2], align: 'right' });
+    doc.text(money(amount),       L + colW[0] + colW[1] + colW[2], rowTextY, { width: colW[3], align: 'right' });
 
-      const labelW = 124;
-      const valW   = 104;
-      const valX   = R - valW;
-      const labelX = valX - labelW - 8;
+    y += rowH;
+  }
 
-      const totalLine = (label, val, bold = false) => {
-        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(9.4).fillColor(bold ? ink : gray6)
-          .text(label, labelX, y, { width: labelW, align: 'right' });
-        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(ink)
-          .text(money(val), valX, y, { width: valW, align: 'right' });
-        y += 12;
-      };
+  // Hidden rows notice
+  if (hiddenCount > 0 && ensureSpace(rowH + 36, y)) {
+    doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
+    doc.font('Helvetica-Oblique').fontSize(9).fillColor(gray6)
+      .text(`+ ${hiddenCount} more item${hiddenCount > 1 ? 's' : ''} included in totals`,
+            L + 8, y + 3, { width: W - 16 });
+    y += rowH;
+  }
 
-      totalLine('Subtotal', subtotalEx);
-      totalLine(`VAT (${Math.round(vatRate * 100)}%)`, vatAmt);
-      totalLine(monthly ? 'Total / month' : 'Total (once-off)', totalInc, true);
-    }
+  // Totals
+  if (ensureSpace(50, y)) {
+    doc.moveTo(L, y).lineTo(R, y).strokeColor(line).stroke();
+    y += 6;
 
-    // Commit local y back to doc
-    doc.y = y + 2;
-  };
+    const labelW = 124;
+    const valW   = 104;
+    const valX   = R - valW;
+    const labelX = valX - labelW - 8;
+
+    const totalLine = (label, val, bold = false) => {
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(9.4).fillColor(bold ? ink : gray6)
+        .text(label, labelX, y, { width: labelW, align: 'right' });
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(ink)
+        .text(money(val), valX, y, { width: valW, align: 'right' });
+      y += 12;
+    };
+
+    totalLine('Subtotal', subtotalEx);
+    totalLine(`VAT (${Math.round(vatRate * 100)}%)`, vatAmt);
+    totalLine(monthly ? 'Total / month' : 'Total (once-off)', totalInc, true);
+  }
+
+  // Commit local y back to doc
+  doc.y = y + 2;
+};
 
   // Stamp (first page only)
   paintStamp(q.stamp);

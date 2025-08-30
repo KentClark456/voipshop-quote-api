@@ -176,7 +176,6 @@ if (ensureSpace(90)) {
   doc.y = cardYStart + cardHeight + 10;
 }
 
-
   // Totals (compute once)
   const vatRate = Number(q.company?.vatRate ?? 0.15);
   const onceSub = Number(q.subtotals?.onceOff || 0);
@@ -259,18 +258,25 @@ if (ensureSpace(90)) {
 
       const it   = itemsArr[i] || {};
       const name = typeof it.name === 'string' ? it.name : String(it.name ?? '');
+      const nameLower = name.toLowerCase();
 
       const unitRaw = Number(it.unit);
       const qtyRaw  = Number(it.qty);
 
-      const looksLikeCalls = /(?:^|\b)(?:calls?|minutes?|bundle)\b/i.test(name);
+      // Detect calls/minutes line
+      const looksLikeCalls =
+        Boolean(it.isCalls) ||
+        /(?:^|\b)(?:calls?|minutes?|bundle)\b/i.test(name);
 
+      // Pull minutes from tags first
       const minuteCandidates = [
         it.minutes, it.qtyMinutes, it.minutesIncluded, it.includedMinutes,
-        it.qty_min, it.qty_mins, it.qtyMin, it.qtyMins
+        it.qty_min, it.qty_mins, it.qtyMin, it.qtyMins, it.bundleMinutes
       ];
-      let itemMinutes = minuteCandidates.map(n => Number(n)).find(n => Number.isFinite(n) && n > 0) || 0;
+      let itemMinutes =
+        minuteCandidates.map(n => Number(n)).find(n => Number.isFinite(n) && n > 0) || 0;
 
+      // If still not present, try parsing from the name
       if (!itemMinutes) {
         const m = name.match(/(\d{2,5})\s*(?:mins?|minutes?)\b/i)
                || name.match(/\bbundle\s*(\d{2,5})\b/i)
@@ -278,24 +284,44 @@ if (ensureSpace(90)) {
         if (m && Number(m[1]) > 0) itemMinutes = Number(m[1]);
       }
 
-      const minutesForRow   = itemMinutes > 0 ? itemMinutes : (looksLikeCalls ? safeGlobalMinutes : 0);
-      const isMinutesBundle = !!(monthly && minutesForRow > 0);
+      // Final minutes value per row
+      const minutesForRow = itemMinutes > 0 ? itemMinutes : (looksLikeCalls ? safeGlobalMinutes : 0);
 
+      // Explicit Pay-as-you-go detection → force 0 minutes
+      const isPayg = looksLikeCalls && (
+        /pay[-\s]?as[-\s]?you[-\s]?go/i.test(nameLower) ||
+        Number(minutesForRow) <= 0 ||
+        Number(qtyRaw) <= 0
+      );
+
+      // For calls with minutes, show minutes as the Qty and "minutes" as Unit
+      const isMinutesBundle = !!(monthly && looksLikeCalls && !isPayg && minutesForRow > 0);
+
+      // Compute Qty/Unit/Amount
       const qtyVal = isMinutesBundle
-        ? minutesForRow
-        : (Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1);
+        ? minutesForRow            // show actual minutes
+        : isPayg
+          ? 0                      // PAYG shows 0 minutes
+          : (Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1);
 
-      const unitDisplay = isMinutesBundle
+      const unitDisplay = (isMinutesBundle || isPayg)
         ? 'minutes'
         : money(Number.isFinite(unitRaw) ? unitRaw : 0);
 
+      // Use bundle calc for minutes-based calls, else qty * unit
+      const bundleSize = Number(it.bundleSize || q?.meta?.bundleSize || 250);
+      const unitForCalc = looksLikeCalls
+        ? (Number.isFinite(unitRaw) && unitRaw > 0 ? unitRaw : 100) // default R100/bundle if missing
+        : (Number.isFinite(unitRaw) ? unitRaw : 0);
+
       let amount = 0;
       if (isMinutesBundle) {
-        const bundleSize = Number(it.bundleSize || q?.meta?.bundleSize || 250);
-        const bundles    = (Number.isFinite(bundleSize) && bundleSize > 0) ? (minutesForRow / bundleSize) : 0;
-        amount = (Number.isFinite(unitRaw) ? unitRaw : 0) * bundles;
+        const bundles = (Number.isFinite(bundleSize) && bundleSize > 0) ? (minutesForRow / bundleSize) : 0;
+        amount = unitForCalc * bundles;
+      } else if (isPayg) {
+        amount = 0; // Pay-as-you-go -> 0 minutes -> R0
       } else {
-        amount = (Number.isFinite(unitRaw) ? unitRaw : 0) * qtyVal;
+        amount = unitForCalc * qtyVal;
       }
       if (!Number.isFinite(amount)) amount = 0;
 
@@ -303,8 +329,15 @@ if (ensureSpace(90)) {
       doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
       rowIndex++;
 
+      // Description: append minutes context for calls
+      const desc = looksLikeCalls
+        ? (isPayg
+            ? `${name} — 0 minutes (Pay-as-you-go)`
+            : `${name} — ${minutesForRow} minutes`)
+        : name;
+
       const rowTextY = y + 3;
-      doc.text(name,                L + 8,                       rowTextY, { width: colW[0] - 10 });
+      doc.text(desc,                L + 8,                       rowTextY, { width: colW[0] - 10 });
       doc.text(String(qtyVal || 0), L + colW[0],                 rowTextY, { width: colW[1], align: 'right' });
       doc.text(unitDisplay,         L + colW[0] + colW[1],       rowTextY, { width: colW[2], align: 'right' });
       doc.text(money(amount),       L + colW[0] + colW[1] + colW[2], rowTextY, { width: colW[3], align: 'right' });
