@@ -161,70 +161,105 @@ export default async function handler(req, res) {
       logoUrl: 'https://voipshop.co.za/Assets/Group%201642logo%20(1).png'
     };
 
-    // ---------- Build PDF payloads ----------
-    const invNumber = invoiceNumber || 'INV-' + Date.now();
-    const ordNumber = orderNumber || 'VS-' + Math.floor(Math.random() * 1e6);
+// ---------- Build PDF payloads ----------
+const invNumber = invoiceNumber || 'INV-' + Date.now();
+const ordNumber = orderNumber || 'VS-' + Math.floor(Math.random() * 1e6);
 
-    const invoicePayload = {
-      invoiceNumber: invNumber,
-      orderNumber: ordNumber,
-      dateISO: new Date().toISOString().slice(0, 10),
-      client: {
-        name: customer.name || customer.company || '',
-        company: customer.company || '',
-        email: customer.email,
-        phone: customer.phone || '',
-        address: customer.address || ''
-      },
-      itemsOnceOff: (onceOff.items || []).map(i => ({
-        name: i.name, qty: Math.max(1, Number(i.qty || 1)), unit: Number(i.unit || 0)
-      })),
-      itemsMonthly: (monthly.items || []).map(i => ({
-        name: i.name, qty: Math.max(1, Number(i.qty || 1)), unit: Number(i.unit || 0)
-      })),
-      subtotals: {
-        onceOff: Number(onceOff?.totals?.exVat || 0),
-        monthly: Number(monthly?.totals?.exVat || 0)
-      },
-      notes: 'Thank you for your order.',
-      company: COMPANY,
-      port // optional context for invoice footer, if your builder uses it
-    };
+// Surface minutes + package/context to builders (don’t lose shape)
+const minutesPackage =
+  body?.minutesPackage ||
+  monthly?.minutesPackage ||
+  null;
 
-    const slaPayload = {
-      company: COMPANY,
-      customer: {
-        name: customer.company || customer.name || 'Customer',
-        contact: customer.name || '',
-        email: customer.email,
-        phone: customer.phone || '',
-        address: customer.address || ''
-      },
-      slaNumber: 'SLA-' + new Date().toISOString().slice(0,10).replace(/-/g,''),
-      effectiveDateISO: new Date().toISOString().slice(0,10),
-      noticeDays: 30,
-      monthlyExVat: Number(monthly?.totals?.exVat || 0),
-      monthlyInclVat: Number(monthly?.totals?.exVat || 0) * (1 + Number(COMPANY.vatRate || 0.15)),
-      vatRate: Number(COMPANY.vatRate || 0.15),
-      services: [
-        { name: 'Cloud PBX', qty: Math.max(1, Number(monthly.cloudPbxQty || 1)) },
-        { name: 'Extensions', qty: Math.max(0, Number(monthly.extensions || 3)) },
-        { name: 'Geographic Number (DID)', qty: Math.max(0, Number(monthly.didQty || 1)) },
-        { name: 'Voice Minutes (bundle)', qty: Math.max(0, Number(monthly.minutes || 250)), unit: 'min' }
-      ],
-      debitOrder: {
-        accountName: debit.accountName || '',
-        bank: debit.bank || '',
-        branchCode: debit.branchCode || '',
-        accountNumber: debit.accountNumber || '',
-        accountType: debit.accountType || '',
-        dayOfMonth: debit.dayOfMonth || '',
-        mandateDateISO: new Date().toISOString().slice(0,10)
-      },
-      serviceDescription: 'Hosted PBX (incl. porting, device provisioning, remote support)'
-    };
+// Construct a light "checkout" context that mirrors your front-end shape
+const checkoutCtx = {
+  monthly: {
+    items: Array.isArray(monthly?.items) ? monthly.items : [],
+    cloudPbxQty: Number(monthly?.cloudPbxQty ?? 1),
+    extensions: Number(monthly?.extensions ?? 0),
+    didQty: Number(monthly?.didQty ?? 0),
+    minutes: Number(monthly?.minutes ?? 0)
+  },
+  minutesPackage: minutesPackage || undefined
+};
 
-    const portingPayload = { company: COMPANY, client: invoicePayload.client, port };
+// IMPORTANT: pass RAW monthly items (no remapping) so builders can read minutes/isCalls/bundleSize etc.
+const invoicePayload = {
+  invoiceNumber: invNumber,
+  orderNumber: ordNumber,
+  dateISO: new Date().toISOString().slice(0, 10),
+  client: {
+    name: customer.name || customer.company || '',
+    company: customer.company || '',
+    email: customer.email,
+    phone: customer.phone || '',
+    address: customer.address || ''
+  },
+
+  // Keep once-off basic (usually doesn’t need minutes logic)
+  // If you have richer once-off lines, you can pass them raw too
+  itemsOnceOff: Array.isArray(onceOff?.items) ? onceOff.items : [],
+
+  // ⬇️ RAW monthly items preserved
+  itemsMonthly: Array.isArray(monthly?.items) ? monthly.items : [],
+
+  // Subtotals still provided to avoid drift from display rounding
+  subtotals: {
+    onceOff: Number(onceOff?.totals?.exVat || 0),
+    monthly: Number(monthly?.totals?.exVat || 0)
+  },
+
+  // Pass minutes context so the Invoice builder can synthesize “Calls” if needed
+  minutes: Number(monthly?.minutes ?? 0),
+  minutesPackage,
+  checkout: checkoutCtx,
+
+  notes: 'Thank you for your order.',
+  company: COMPANY,
+  port // optional
+};
+
+const slaPayload = {
+  company: COMPANY,
+  customer: {
+    name: customer.company || customer.name || 'Customer',
+    contact: customer.name || '',
+    email: customer.email,
+    phone: customer.phone || '',
+    address: customer.address || ''
+  },
+  slaNumber: 'SLA-' + new Date().toISOString().slice(0,10).replace(/-/g,''),
+  effectiveDateISO: new Date().toISOString().slice(0,10),
+  noticeDays: 30,
+
+  // Totals remain useful for the summary
+  monthlyExVat: Number(monthly?.totals?.exVat || 0),
+  monthlyInclVat: Number(monthly?.totals?.exVat || 0) * (1 + Number(COMPANY.vatRate || 0.15)),
+  vatRate: Number(COMPANY.vatRate || 0.15),
+
+  // ⬇️ RAW monthly items; let the SLA builder derive services like the Quote/Invoice do
+  itemsMonthly: Array.isArray(monthly?.items) ? monthly.items : [],
+
+  // Minutes context (so SLA can render “Calls” row correctly or synthesize it)
+  minutesIncluded: Number(monthly?.minutes ?? 0),
+  minutes: Number(monthly?.minutes ?? 0),
+  minutesPackage,
+  checkout: checkoutCtx,
+
+  // Keep your debit order + description
+  debitOrder: {
+    accountName: debit.accountName || '',
+    bank: debit.bank || '',
+    branchCode: debit.branchCode || '',
+    accountNumber: debit.accountNumber || '',
+    accountType: debit.accountType || '',
+    dayOfMonth: debit.dayOfMonth || '',
+    mandateDateISO: new Date().toISOString().slice(0,10)
+  },
+  serviceDescription: 'Hosted PBX (incl. porting, device provisioning, remote support)'
+};
+
+const portingPayload = { company: COMPANY, client: invoicePayload.client, port };
 
     // ---------- Build PDFs in parallel ----------
     let invoicePdf, slaPdf, portingPdf;
