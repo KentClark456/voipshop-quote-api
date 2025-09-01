@@ -58,12 +58,51 @@ export async function buildSlaPdfBuffer(params = {}) {
     did: 25
   };
 
-  // ✅ Minutes package from checkout (bundles of 250m @ R100)
-  const minutesPkg =
-    params?.minutesPackage ||
-    checkout?.minutesPackage ||
-    cart?.minutesPackage ||
-    null;
+  // ---- Minutes resolver (IDENTICAL philosophy to Quote/Invoice) ----
+  const resolveMinutesContext = (qObj = {}) => {
+    // Prefer package on any known container
+    const mp =
+      qObj?.minutesPackage ||
+      qObj?.checkout?.minutesPackage ||
+      qObj?.cart?.minutesPackage ||
+      null;
+
+    const mpBundleSize = Number(mp?.bundleSize) > 0 ? Number(mp.bundleSize) : DEFAULT_BUNDLE_SIZE;
+    const mpUnitR      = Number(mp?.unitR)      > 0 ? Number(mp.unitR)      : DEFAULT_BUNDLE_UNIT;
+    const mpMinutes    = Number(mp?.minutes)    > 0 ? Number(mp.minutes)    : 0;
+
+    // Global minutes fallbacks (match Quote) — use ONLY ?? and keep scope within qObj
+    const globalMinutes = Number(
+      qObj?.minutes ??
+      qObj?.monthlyControls?.minutes ??
+      qObj?.meta?.minutes ??
+      qObj?.meta?.minutesIncluded ??
+      qObj?.controls?.minutes ??
+      qObj?.minutesIncluded ??
+      0
+    );
+
+    const finalMinutes = mpMinutes > 0 ? mpMinutes : globalMinutes;
+
+    return {
+      hasPkg: !!mp,
+      minutes: finalMinutes,
+      bundleSize: mpBundleSize,
+      unitR: mpUnitR
+    };
+  };
+
+  const minutesCtx = resolveMinutesContext({
+    minutesPackage: params?.minutesPackage,
+    checkout,
+    cart,
+    minutes: params?.minutes,
+    monthlyControls: params?.monthlyControls,
+    meta: params?.meta,
+    controls: params?.controls,
+    minutesIncluded: params?.minutesIncluded
+  });
+
 
   // ---- PDF init ----
   const doc = new PDFDocument({ size: 'A4', margin: 32 });
@@ -216,6 +255,7 @@ export async function buildSlaPdfBuffer(params = {}) {
 
   // ---- Services derive (pull from checkout/cart/services) ----
   const deriveServices = () => {
+    const isArray = (v) => Array.isArray(v) && v.length;
     const candidates = [
       itemsMonthly,
       checkout?.itemsMonthly,
@@ -227,21 +267,34 @@ export async function buildSlaPdfBuffer(params = {}) {
       cart?.monthly,
       cart?.items,
       services
-    ].filter(Array.isArray);
+    ].filter(isArray);
 
     const raw = candidates.find(a => a && a.length) || [];
 
     const num = (v) => (Number.isFinite(Number(v ?? 0)) ? Number(v) : 0);
     const pickNum = (obj, keys = []) => {
       for (const k of keys) if (obj && (k in obj)) return num(obj[k]);
-      return NaN; // ← differentiate “not present” from 0
+      return NaN; // differentiate “not present” from 0
     };
 
-    // top-level count fallbacks (from checkout.monthly)
+    // Top-level count fallbacks (cover many spellings)
     const topCounts = {
-      cloudPbxQty: num(checkout?.monthly?.cloudPbxQty ?? cart?.monthly?.cloudPbxQty),
-      extensions:  num(checkout?.monthly?.extensions  ?? cart?.monthly?.extensions),
-      didQty:      num(checkout?.monthly?.didQty      ?? cart?.monthly?.didQty),
+      cloudPbxQty:
+        num(checkout?.monthly?.cloudPbxQty ?? cart?.monthly?.cloudPbxQty ??
+            checkout?.cloudPbxQty ?? cart?.cloudPbxQty),
+      extensions:
+        num(
+          checkout?.monthly?.extensions ?? cart?.monthly?.extensions ??
+          checkout?.monthly?.extQty ?? cart?.monthly?.extQty ??
+          checkout?.monthly?.seats ?? cart?.monthly?.seats ??
+          checkout?.extensions ?? cart?.extensions ??
+          checkout?.extQty ?? cart?.extQty ??
+          checkout?.seats ?? cart?.seats ??
+          params?.extensions ?? params?.extQty ?? params?.seats
+        ),
+      didQty:
+        num(checkout?.monthly?.didQty ?? cart?.monthly?.didQty ??
+            checkout?.didQty ?? cart?.didQty)
     };
 
     let hasCallsRow = false;
@@ -255,11 +308,11 @@ export async function buildSlaPdfBuffer(params = {}) {
         /\bcalls?\b/i.test(name) ||
         /min(ute)?s?/i.test(name);
 
-      // --- Qty (non-calls): honour explicit 0; use top-level fallbacks if missing; else default 1
+      // --- Qty (non-calls) — honour explicit 0; if missing, look up sensible top-level count
       let explicitQty = pickNum(it, ['qty', 'quantity', 'count', 'devices', 'units']);
       let qty = Number.isFinite(explicitQty) ? Math.max(0, explicitQty) : NaN;
 
-      // --- Unit resolution
+      // --- Unit resolution (prefer line fields)
       let unitPrice = pickNum(it, [
         'unit', 'unitPrice', 'unit_ex_vat', 'unitExVat', 'unit_price', 'unitPriceExVat',
         'unitMonthly', 'monthlyExVat', 'monthly', 'priceMonthly', 'amountMonthly',
@@ -269,13 +322,13 @@ export async function buildSlaPdfBuffer(params = {}) {
 
       if (!isCalls) {
         // Name-based qty/price fallbacks when missing
-        const isPlatform = /cloud\s*pbx/i.test(nameLower);
-        const isExtFee  = /extension\s*fee/i.test(nameLower);
-        const isApp     = /mobile\s*app/i.test(nameLower);
-        const isDidLike = /geographic\s*number|number\s*hosting|did\b/i.test(nameLower);
+        const isPlatform = /cloud\s*pbx|platform/i.test(nameLower);
+        const isExtFee  = /\b(extension|seat|user)\b.*fee|\bextension\b(?!.*minutes)/i.test(nameLower);
+        const isApp     = /mobile\s*app|softphone/i.test(nameLower);
+        const isDidLike = /geographic\s*number|number\s*hosting|\bdid\b/i.test(nameLower);
         const isPorted  = /ported/i.test(nameLower);
 
-        // qty fallback
+        // qty fallback (NO magic 3 — pull from checkout/cart if present; else 1)
         if (!Number.isFinite(qty)) {
           if (isPlatform && Number.isFinite(topCounts.cloudPbxQty)) qty = topCounts.cloudPbxQty;
           else if ((isExtFee || isApp) && Number.isFinite(topCounts.extensions)) qty = topCounts.extensions;
@@ -295,32 +348,28 @@ export async function buildSlaPdfBuffer(params = {}) {
         return { name, qty, unitPrice: num(unitPrice), note, isCalls: false };
       }
 
-      // ---- Calls row (minutes)
+      // ---- Calls row (minutes) — MIRROR QUOTE: Qty = minutes; Unit = Rxxx / {bundle}m
       hasCallsRow = true;
 
       const bundleSize =
-        Number.isFinite(pickNum(it, ['bundleSize'])) ? pickNum(it, ['bundleSize']) : DEFAULT_BUNDLE_SIZE;
+        Number.isFinite(pickNum(it, ['bundleSize'])) ? pickNum(it, ['bundleSize']) : minutesCtx.bundleSize;
 
-      let minutes =
-        pickNum(it, [
-          'minutes', 'minutesIncluded', 'includedMinutes',
-          'qtyMinutes', 'qty_min', 'qtyMin', 'bundleMinutes'
-        ]);
-      if (!Number.isFinite(minutes)) minutes = num(minutesPkg?.minutes) || 0;
+      // prefer explicit minutes on the line
+      let minutes = pickNum(it, [
+        'minutes', 'minutesIncluded', 'includedMinutes',
+        'qtyMinutes', 'qty_min', 'qtyMin', 'bundleMinutes'
+      ]);
+      if (!Number.isFinite(minutes)) minutes = minutesCtx.minutes;
 
-      // Unit R per bundle — prefer line, else minutesPkg, else default
-      if (minutes > 0) {
-        unitPrice = unitPrice > 0 ? unitPrice : (num(minutesPkg?.unitR) || DEFAULT_BUNDLE_UNIT);
-      } else {
-        unitPrice = unitPrice > 0 ? unitPrice : (num(minutesPkg?.unitR) || DEFAULT_BUNDLE_UNIT);
-      }
+      // Unit R per bundle — prefer line, else ctx, else default
+      unitPrice = unitPrice > 0 ? unitPrice : minutesCtx.unitR;
 
       const noteBase = String(it?.note || it?.notes || '').trim();
       const note = minutes > 0 ? `MINUTES: ${minutes}` : (noteBase || 'No bundle selected');
 
       return {
         name: name || 'Calls',
-        qty: Number.isFinite(qty) ? qty : 1, // not used in line total for calls
+        qty: 1, // qty not used for calls math; display shows minutes
         unitPrice: num(unitPrice),
         isCalls: true,
         minutes: num(minutes),
@@ -329,18 +378,16 @@ export async function buildSlaPdfBuffer(params = {}) {
       };
     });
 
-    // If no calls row came through but minutesPkg exists, synthesize one
-    if (!hasCallsRow && minutesPkg) {
+    // If no calls row came through but minutes context exists, synthesize one
+    if (!hasCallsRow && (minutesCtx.hasPkg || minutesCtx.minutes > 0)) {
       normalized.push({
         name: 'Calls',
         qty: 1,
-        unitPrice: num(minutesPkg.unitR) || DEFAULT_BUNDLE_UNIT,
+        unitPrice: minutesCtx.unitR,
         isCalls: true,
-        minutes: num(minutesPkg.minutes) || 0,
-        bundleSize: DEFAULT_BUNDLE_SIZE,
-        note: (num(minutesPkg.minutes) || 0) > 0
-          ? `MINUTES: ${num(minutesPkg.minutes)}`
-          : 'No bundle selected'
+        minutes: minutesCtx.minutes,
+        bundleSize: minutesCtx.bundleSize,
+        note: minutesCtx.minutes > 0 ? `MINUTES: ${minutesCtx.minutes}` : 'No bundle selected'
       });
     }
 
@@ -432,6 +479,7 @@ export async function buildSlaPdfBuffer(params = {}) {
 
       let qtyCell, unitCell, lineTotal, desc;
       if (isCalls) {
+        // MIRROR QUOTE — Qty shows minutes; Unit shows Rxxx / {bundle}m
         const minsForRow = isPayg ? 0 : minutes;
         const bundles    = (bundleSize > 0) ? (minsForRow / bundleSize) : 0;
         qtyCell   = String(minsForRow || 0);
@@ -560,7 +608,6 @@ export async function buildSlaPdfBuffer(params = {}) {
 
   // Footer Page 1
   footer(1, true);
-
   // =========================
   // PAGE 2 — Debit Order Mandate + T&Cs
   // =========================
