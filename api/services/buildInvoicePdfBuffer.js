@@ -71,6 +71,19 @@ export async function buildInvoicePdfBuffer(q = {}) {
   const ensureSpace = (need, yPos = doc.y) => (yPos <= pageBottom() - (need + FOOTER_H));
   const spaceLeft  = () => (pageBottom() - FOOTER_H - doc.y);
 
+  // ---- Minutes package (aligned with SLA/Quote) ----
+  const minutesPackage = (() => {
+    const mp =
+      q?.minutesPackage ||
+      q?.checkout?.minutesPackage ||
+      q?.cart?.minutesPackage ||
+      null;
+    const bundleSize = Number(mp?.bundleSize) > 0 ? Number(mp.bundleSize) : 250;
+    const unitR = Number(mp?.unitR) > 0 ? Number(mp.unitR) : 100; // R per bundle (ex VAT display baseline)
+    const minutes = Number(mp?.minutes) > 0 ? Number(mp.minutes) : 0;
+    return { bundleSize, unitR, minutes, has: !!mp };
+  })();
+
   // Optional stamp
   const paintStamp = (text) => {
     if (!text) return;
@@ -203,7 +216,7 @@ export async function buildInvoicePdfBuffer(q = {}) {
     doc.y = yStart + cardH + 12; // give more air after cards
   }
 
-  // Global minutes fallback
+  // Global minutes fallback (as a last resort)
   const globalMinutes = Number(
     q?.minutes ??
     q?.monthlyControls?.minutes ??
@@ -212,6 +225,26 @@ export async function buildInvoicePdfBuffer(q = {}) {
     q?.controls?.minutes ??
     0
   );
+
+  // Inject a Calls line if monthly section lacks one but minutesPackage is present
+  const synthMonthlyItems = (items = []) => {
+    const arr = Array.isArray(items) ? [...items] : [];
+    const hasCalls = arr.some((it) => {
+      const name = String(it?.name || it?.title || '').toLowerCase();
+      return Boolean(it?.isCalls) || /\bcalls?\b/.test(name) || /min(ute)?s?/.test(name);
+    });
+
+    if (!hasCalls && minutesPackage.has) {
+      arr.push({
+        name: 'Calls',
+        isCalls: true,
+        minutes: Number(minutesPackage.minutes) || 0,
+        bundleSize: Number(minutesPackage.bundleSize) || 250,
+        unit: Number(minutesPackage.unitR) || 100 // R per bundle
+      });
+    }
+    return arr;
+  };
 
 // TABLE (compact, one page)
 const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
@@ -249,10 +282,12 @@ const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
 
   const safeGlobalMinutes = Number.isFinite(Number(globalMinutes)) ? Number(globalMinutes) : 0;
 
-  const itemsArr = Array.isArray(items) ? items : [];
+  const itemsArrBase = Array.isArray(items) ? items : [];
+  const itemsArr = monthly ? synthMonthlyItems(itemsArrBase) : itemsArrBase;
+
   for (let i = 0; i < itemsArr.length; i++) {
     // Need space for at least 1 row + totals later
-    if (!ensureSpace(110, y)) { hiddenCount = itemsArr.length - i; break; } // slightly lower reserve than before
+    if (!ensureSpace(110, y)) { hiddenCount = itemsArr.length - i; break; }
 
     const it = itemsArr[i] || {};
     const name = typeof it.name === 'string' ? it.name : String(it.name ?? '');
@@ -284,7 +319,11 @@ const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
     }
 
     // Final minutes value per row
-    const minutesForRow = itemMinutes > 0 ? itemMinutes : (looksLikeCalls ? safeGlobalMinutes : 0);
+    const minutesForRow = itemMinutes > 0
+      ? itemMinutes
+      : (looksLikeCalls
+          ? (Number(minutesPackage.minutes) || Number(safeGlobalMinutes) || 0)
+          : 0);
 
     // PAYG detection → force 0 minutes and R0
     const isPayg = looksLikeCalls && (
@@ -293,30 +332,40 @@ const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
       Number(qtyRaw) <= 0
     );
 
-    // For calls with minutes, show minutes as the Qty and "minutes" as Unit
-    const isMinutesBundle = !!(monthly && looksLikeCalls && !isPayg && minutesForRow > 0);
+    // Bundle settings / unitR for calls
+    const bundleSize = looksLikeCalls
+      ? (Number(it.bundleSize) > 0 ? Number(it.bundleSize) : Number(minutesPackage.bundleSize) || 250)
+      : 0;
 
-    // Compute Qty/Unit/Amount
-    const qtyVal = isMinutesBundle
-      ? minutesForRow
-      : isPayg
-        ? 0
-        : (Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1);
+    const unitRForBundle = looksLikeCalls
+      ? (Number(unitRaw) > 0 ? Number(unitRaw) : Number(minutesPackage.unitR) || 100)
+      : (Number(unitRaw) > 0 ? Number(unitRaw) : 0);
 
-    const unitDisplay = (isMinutesBundle || isPayg)
-      ? 'minutes'
-      : money(Number.isFinite(unitRaw) ? unitRaw : 0);
+    // Compute Qty / Unit / Amount + description
+    let qtyVal, unitDisplay, amount, desc;
 
-    let amount = 0;
-    if (isMinutesBundle) {
-      const bundleSize = Number(it.bundleSize || q?.meta?.bundleSize || 250);
-      const bundles = (Number.isFinite(bundleSize) && bundleSize > 0) ? (minutesForRow / bundleSize) : 0;
-      amount = (Number.isFinite(unitRaw) ? unitRaw : 0) * bundles;
-    } else if (isPayg) {
-      amount = 0;
+    if (looksLikeCalls) {
+      if (isPayg) {
+        qtyVal = 0;
+        unitDisplay = 'minutes';
+        amount = 0;
+        desc = `${name} — 0 minutes (Pay-as-you-go)`;
+      } else {
+        // show minutes as qty; unit shows Rxxx / {bundleSize}m
+        qtyVal = minutesForRow;
+        unitDisplay = `${money(unitRForBundle)} / ${bundleSize}m`;
+        const bundles = (bundleSize > 0) ? (minutesForRow / bundleSize) : 0;
+        amount = (Number.isFinite(bundles) ? bundles : 0) * unitRForBundle;
+        desc = `${name} — ${minutesForRow} minutes`;
+      }
     } else {
-      amount = (Number.isFinite(unitRaw) ? unitRaw : 0) * qtyVal;
+      // Non-calls: regular qty × unit
+      qtyVal = Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1;
+      unitDisplay = money(unitRForBundle);
+      amount = unitRForBundle * qtyVal;
+      desc = name;
     }
+
     if (!Number.isFinite(amount)) amount = 0;
 
     // Row bg
@@ -324,7 +373,7 @@ const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
     rowIndex++;
 
     const rowTextY = y + 3;
-    doc.text(name,                L + 8,                       rowTextY, { width: colW[0] - 10 });
+    doc.text(desc,                L + 8,                       rowTextY, { width: colW[0] - 10 });
     doc.text(String(qtyVal || 0), L + colW[0],                 rowTextY, { width: colW[1], align: 'right' });
     doc.text(unitDisplay,         L + colW[0] + colW[1],       rowTextY, { width: colW[2], align: 'right' });
     doc.text(money(amount),       L + colW[0] + colW[1] + colW[2], rowTextY, { width: colW[3], align: 'right' });

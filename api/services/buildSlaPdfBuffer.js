@@ -50,6 +50,21 @@ export async function buildSlaPdfBuffer(params = {}) {
   const DEFAULT_BUNDLE_SIZE = 250; // minutes per bundle
   const DEFAULT_BUNDLE_UNIT = 100; // R per bundle (ex VAT)
 
+  // ✅ Fallback rates (only used if the line didn’t carry prices)
+  const FALLBACK_RATES = {
+    platform: 150,
+    extension: 65,
+    app: 65,
+    did: 25
+  };
+
+  // ✅ Minutes package from checkout (bundles of 250m @ R100)
+  const minutesPkg =
+    params?.minutesPackage ||
+    checkout?.minutesPackage ||
+    cart?.minutesPackage ||
+    null;
+
   // ---- PDF init ----
   const doc = new PDFDocument({ size: 'A4', margin: 32 });
   const chunks = [];
@@ -66,7 +81,6 @@ export async function buildSlaPdfBuffer(params = {}) {
   const moveY = (amt = 0) => { y = (doc.y = (doc.y + amt)); };
 
   // ---- Footer helper ----
-  // includeAgreementNo=false removes the "Agreement No: ..." part
   const footer = (pageIdx /*1-based*/, includeAgreementNo = true) => {
     const yFooter = doc.page.height - 24;
     const rightText = includeAgreementNo
@@ -76,19 +90,16 @@ export async function buildSlaPdfBuffer(params = {}) {
       .text(rightText, L, yFooter, { width: W, align: 'right' });
   };
 
-  // ---- Header helper (title left; logo right only on Page 1) ----
+  // ---- Header helper ----
   const newPageWithHeader = async (title, {
     subtitle = 'Effective from signing date • Confidential',
-    showLogo = true,         // << control logo on this page
+    showLogo = true,
   } = {}) => {
     if (doc.page && doc.page.number >= 1) {
-      // For first call (page 1), number is 1 and we do NOT add a page.
-      // For subsequent pages, add a page.
       if (doc.page.number > 1 || title !== 'Service Level Agreement') doc.addPage();
     }
 
     if (showLogo) {
-      // Use the branding helper with logo
       y = await drawLogoHeader(doc, {
         logoUrl: company?.logoUrl || '',
         localLogoHints: [ LOCAL_LOGO ],
@@ -101,7 +112,6 @@ export async function buildSlaPdfBuffer(params = {}) {
       y = Math.max(y, 70);
       doc.y = y;
     } else {
-      // Minimal header (no logo)
       const topPad = 18;
       doc.font('Helvetica-Bold').fontSize(16).fillColor(INK)
          .text(title, L, topPad, { width: W, align: 'left' });
@@ -126,7 +136,6 @@ export async function buildSlaPdfBuffer(params = {}) {
     const contentTop  = cardTop + headerH + 6;
     const contentW    = w0 - innerPad * 2;
 
-    // Title (left)
     doc.font('Helvetica-Bold').fontSize(10).fillColor(INK).text(cardTitle, titleX, titleY, { width: contentW });
 
     doc.y = contentTop; y = contentTop;
@@ -142,7 +151,6 @@ export async function buildSlaPdfBuffer(params = {}) {
     doc.y = cardTop + hCard + gapAfter; y = doc.y;
   };
 
-  // Two-up: Parties card
   const drawTwoUpCard = (cardTitle, leftCb, rightCb) => {
     const innerPad = 12, headerH = 18, colGap = 18;
     const cardTop = y, x0 = L, w0 = W;
@@ -186,7 +194,6 @@ export async function buildSlaPdfBuffer(params = {}) {
       yRight += 18 + (lines - 1) * 10;
     };
 
-    // Column headings
     doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text('Provider Details', leftX, innerTop - 2);
     yLeft += 12;
     doc.font('Helvetica-Bold').fontSize(9).fillColor(INK).text('Customer Details', rightX, innerTop - 2);
@@ -209,68 +216,135 @@ export async function buildSlaPdfBuffer(params = {}) {
 
   // ---- Services derive (pull from checkout/cart/services) ----
   const deriveServices = () => {
-    // Try the most likely monthly arrays first
     const candidates = [
       itemsMonthly,
       checkout?.itemsMonthly,
+      checkout?.monthly?.items,
       checkout?.monthly,
       checkout?.items,
       cart?.itemsMonthly,
+      cart?.monthly?.items,
       cart?.monthly,
       cart?.items,
       services
     ].filter(Array.isArray);
 
-    const items = candidates.find(a => a && a.length) || [];
+    const raw = candidates.find(a => a && a.length) || [];
 
     const num = (v) => (Number.isFinite(Number(v ?? 0)) ? Number(v) : 0);
-    const globMin = Number(minutesIncluded || 0);
-
-    // Helper: pick first numeric value from a list of keys
     const pickNum = (obj, keys = []) => {
-      for (const k of keys) {
-        if (obj && (k in obj)) return num(obj[k]);
-      }
-      return 0;
+      for (const k of keys) if (obj && (k in obj)) return num(obj[k]);
+      return NaN; // ← differentiate “not present” from 0
     };
 
-    return items.map((it = {}) => {
-      const name = String(it?.name || it?.title || it?.description || it?.sku || it?.product || '').trim();
+    // top-level count fallbacks (from checkout.monthly)
+    const topCounts = {
+      cloudPbxQty: num(checkout?.monthly?.cloudPbxQty ?? cart?.monthly?.cloudPbxQty),
+      extensions:  num(checkout?.monthly?.extensions  ?? cart?.monthly?.extensions),
+      didQty:      num(checkout?.monthly?.didQty      ?? cart?.monthly?.didQty),
+    };
 
-      // Detect a Calls/minutes line
+    let hasCallsRow = false;
+
+    const normalized = raw.map((it = {}) => {
+      const name = String(it?.name || it?.title || it?.description || it?.sku || it?.product || '').trim();
+      const nameLower = name.toLowerCase();
+
       const isCalls =
         Boolean(it?.isCalls) ||
         /\bcalls?\b/i.test(name) ||
         /min(ute)?s?/i.test(name);
 
-      // Quantity (units/bundles)
-      const qty = Math.max(1, pickNum(it, ['qty', 'quantity', 'count', 'devices', 'units']) || 1);
+      // --- Qty (non-calls): honour explicit 0; use top-level fallbacks if missing; else default 1
+      let explicitQty = pickNum(it, ['qty', 'quantity', 'count', 'devices', 'units']);
+      let qty = Number.isFinite(explicitQty) ? Math.max(0, explicitQty) : NaN;
 
-      // Bundle size (calls)
-      const bundleSize = isCalls ? (pickNum(it, ['bundleSize']) || DEFAULT_BUNDLE_SIZE) : 0;
+      // --- Unit resolution
+      let unitPrice = pickNum(it, [
+        'unit', 'unitPrice', 'unit_ex_vat', 'unitExVat', 'unit_price', 'unitPriceExVat',
+        'unitMonthly', 'monthlyExVat', 'monthly', 'priceMonthly', 'amountMonthly',
+        'perMonth', 'price_ex_vat', 'priceExVat', 'price', 'amount', 'net'
+      ]);
+      unitPrice = Number.isFinite(unitPrice) ? unitPrice : 0;
 
-      // Minutes: explicit -> qty*bundleSize -> global fallback
-      let minutes = isCalls
-        ? (pickNum(it, ['minutes', 'minutesIncluded', 'includedMinutes', 'qtyMinutes', 'qty_min', 'qtyMin', 'bundleMinutes']) ||
-           (qty * bundleSize) ||
-           globMin)
-        : 0;
+      if (!isCalls) {
+        // Name-based qty/price fallbacks when missing
+        const isPlatform = /cloud\s*pbx/i.test(nameLower);
+        const isExtFee  = /extension\s*fee/i.test(nameLower);
+        const isApp     = /mobile\s*app/i.test(nameLower);
+        const isDidLike = /geographic\s*number|number\s*hosting|did\b/i.test(nameLower);
+        const isPorted  = /ported/i.test(nameLower);
 
-      // Unit price (prefer explicit; fallback for Calls)
-      let unitPrice =
+        // qty fallback
+        if (!Number.isFinite(qty)) {
+          if (isPlatform && Number.isFinite(topCounts.cloudPbxQty)) qty = topCounts.cloudPbxQty;
+          else if ((isExtFee || isApp) && Number.isFinite(topCounts.extensions)) qty = topCounts.extensions;
+          else if (isDidLike && Number.isFinite(topCounts.didQty)) qty = topCounts.didQty;
+          else qty = 1;
+        }
+
+        // unit fallback
+        if (unitPrice <= 0) {
+          if (isPlatform) unitPrice = FALLBACK_RATES.platform;
+          else if (isExtFee) unitPrice = FALLBACK_RATES.extension;
+          else if (isApp) unitPrice = FALLBACK_RATES.app;
+          else if (isDidLike) unitPrice = isPorted ? 0 : FALLBACK_RATES.did;
+        }
+
+        const note = String(it?.note || it?.notes || '').trim();
+        return { name, qty, unitPrice: num(unitPrice), note, isCalls: false };
+      }
+
+      // ---- Calls row (minutes)
+      hasCallsRow = true;
+
+      const bundleSize =
+        Number.isFinite(pickNum(it, ['bundleSize'])) ? pickNum(it, ['bundleSize']) : DEFAULT_BUNDLE_SIZE;
+
+      let minutes =
         pickNum(it, [
-          'unit', 'unitPrice', 'unit_ex_vat', 'unitExVat', 'unit_price', 'unitPriceExVat',
-          'unitMonthly', 'monthlyExVat', 'monthly', 'priceMonthly', 'amountMonthly',
-          'perMonth', 'price_ex_vat', 'priceExVat', 'price', 'amount', 'net'
+          'minutes', 'minutesIncluded', 'includedMinutes',
+          'qtyMinutes', 'qty_min', 'qtyMin', 'bundleMinutes'
         ]);
-      if (isCalls && unitPrice <= 0) unitPrice = DEFAULT_BUNDLE_UNIT;
+      if (!Number.isFinite(minutes)) minutes = num(minutesPkg?.minutes) || 0;
 
-      // Note / marker for downstream linking
-      const baseNote = String(it?.note || it?.notes || '').trim();
-      const note = isCalls ? `MINUTES: ${minutes}` : baseNote;
+      // Unit R per bundle — prefer line, else minutesPkg, else default
+      if (minutes > 0) {
+        unitPrice = unitPrice > 0 ? unitPrice : (num(minutesPkg?.unitR) || DEFAULT_BUNDLE_UNIT);
+      } else {
+        unitPrice = unitPrice > 0 ? unitPrice : (num(minutesPkg?.unitR) || DEFAULT_BUNDLE_UNIT);
+      }
 
-      return { name, qty, unitPrice, note, isCalls, minutes, bundleSize };
+      const noteBase = String(it?.note || it?.notes || '').trim();
+      const note = minutes > 0 ? `MINUTES: ${minutes}` : (noteBase || 'No bundle selected');
+
+      return {
+        name: name || 'Calls',
+        qty: Number.isFinite(qty) ? qty : 1, // not used in line total for calls
+        unitPrice: num(unitPrice),
+        isCalls: true,
+        minutes: num(minutes),
+        bundleSize,
+        note
+      };
     });
+
+    // If no calls row came through but minutesPkg exists, synthesize one
+    if (!hasCallsRow && minutesPkg) {
+      normalized.push({
+        name: 'Calls',
+        qty: 1,
+        unitPrice: num(minutesPkg.unitR) || DEFAULT_BUNDLE_UNIT,
+        isCalls: true,
+        minutes: num(minutesPkg.minutes) || 0,
+        bundleSize: DEFAULT_BUNDLE_SIZE,
+        note: (num(minutesPkg.minutes) || 0) > 0
+          ? `MINUTES: ${num(minutesPkg.minutes)}`
+          : 'No bundle selected'
+      });
+    }
+
+    return normalized;
   };
 
   const svc = deriveServices();
@@ -335,7 +409,7 @@ export async function buildSlaPdfBuffer(params = {}) {
     const rows = Array.isArray(svc) ? svc : [];
     if (!rows.length) {
       doc.font('Helvetica').fontSize(7.8).fillColor(MUTED)
-        .text('No monthly service lines were supplied. (Provide `itemsMonthly` or `checkout.itemsMonthly` etc.)', x, y, { width: w });
+        .text('No monthly service lines were supplied. (Provide `itemsMonthly` or `checkout.monthly.items` etc.)', x, y, { width: w });
       moveY(10);
       return;
     }
@@ -345,49 +419,38 @@ export async function buildSlaPdfBuffer(params = {}) {
     let subtotal = 0;
 
     for (const it of rows) {
-      // Stop if no space for another row + totals (leave room for totals line)
       if (!hasSpace(rowH + 42)) break;
 
       const unit = Number(it.unitPrice) || 0;
-      const qty  = Number(it.qty) || 0;
-
-      // Minute/PAYG logic (no layout changes)
-      const nameLower  = String(it.name || '').toLowerCase();
+      const qty  = Number(it.qty); // can be 0
       const isCalls    = !!it.isCalls;
       const minutes    = Number(it.minutes || 0);
       const bundleSize = Number(it.bundleSize || DEFAULT_BUNDLE_SIZE);
+      const name       = String(it.name || '');
 
-      // PAYG if explicitly named or no minutes/qty provided
-      const isPayg = isCalls && (
-        /pay[-\s]?as[-\s]?you[-\s]?go/.test(nameLower) ||
-        minutes <= 0 ||
-        qty <= 0
-      );
+      const isPayg = isCalls && (minutes <= 0);
 
-      // Compute values to display
       let qtyCell, unitCell, lineTotal, desc;
       if (isCalls) {
         const minsForRow = isPayg ? 0 : minutes;
         const bundles    = (bundleSize > 0) ? (minsForRow / bundleSize) : 0;
-
-        // Qty shows minutes; Unit cell shows price per bundle with bundle size
         qtyCell   = String(minsForRow || 0);
         unitCell  = isPayg ? 'minutes' : `${money(unit)} / ${bundleSize}m`;
         lineTotal = isPayg ? 0 : (unit * bundles);
-        desc      = minsForRow ? `${it.name} — ${minsForRow} minutes` : `${it.name} — Pay-as-you-go`;
+        desc      = minsForRow ? `${name} — ${minsForRow} minutes` : `${name} — Pay-as-you-go`;
       } else {
-        qtyCell   = String(qty || 0);
+        qtyCell   = String(Math.max(0, qty));
         unitCell  = unit > 0 ? money(unit) : '—';
-        lineTotal = unit * qty;
-        desc      = it.name || '';
+        lineTotal = unit * Math.max(0, qty);
+        desc      = name;
       }
 
       subtotal += Number.isFinite(lineTotal) ? lineTotal : 0;
 
-      doc.text(desc,                     rx[0], y, { width: cW[0] });
-      doc.text(qtyCell,                  rx[1], y, { width: cW[1], align: 'right' });
-      doc.text(unitCell,                 rx[2], y, { width: cW[2], align: 'right' });
-      doc.text(money(lineTotal),         rx[3], y, { width: cW[3], align: 'right' });
+      doc.text(desc,             rx[0], y, { width: cW[0] });
+      doc.text(qtyCell,          rx[1], y, { width: cW[1], align: 'right' });
+      doc.text(unitCell,         rx[2], y, { width: cW[2], align: 'right' });
+      doc.text(money(lineTotal), rx[3], y, { width: cW[3], align: 'right' });
       moveY(rowH);
 
       if (it.note) {
@@ -421,91 +484,81 @@ export async function buildSlaPdfBuffer(params = {}) {
     line('Monthly Total (incl VAT)', total, true);
   }, { minHeight: 72 });
 
- // Response Time & Downtime Policy — two clean text columns (no table)
-drawCard('Response Time & Downtime Policy', ({ x, w }) => {
-  const colGap = 18;
-  const colW = (w - colGap) / 2;
-  const leftX = x;
-  const rightX = x + colW + colGap;
+  // Response Time & Downtime Policy — two clean text columns (no table)
+  drawCard('Response Time & Downtime Policy', ({ x, w }) => {
+    const colGap = 18;
+    const colW = (w - colGap) / 2;
+    const leftX = x;
+    const rightX = x + colW + colGap;
 
-  const titleFont = () => doc.font('Helvetica-Bold').fontSize(8.5).fillColor(INK);
-  const bodyFont  = () => doc.font('Helvetica').fontSize(8).fillColor(MUTED);
+    const titleFont = () => doc.font('Helvetica-Bold').fontSize(8.5).fillColor(INK);
+    const bodyFont  = () => doc.font('Helvetica').fontSize(8).fillColor(MUTED);
 
-  // Local column writer that DOES NOT rely on global moveY/hasSpace
-  const writeColumn = (tx, ty, tw, sections) => {
-    let cy = ty;
-    for (const sec of sections) {
-      // Section title
-      titleFont().text(sec.title, tx, cy, { width: tw });
-      const th = doc.heightOfString(sec.title, { width: tw });
-      cy += Math.max(10, th + 2);
+    const writeColumn = (tx, ty, tw, sections) => {
+      let cy = ty;
+      for (const sec of sections) {
+        titleFont().text(sec.title, tx, cy, { width: tw });
+        const th = doc.heightOfString(sec.title, { width: tw });
+        cy += Math.max(10, th + 2);
 
-      // Bullets
-      bodyFont();
-      const dotW = 9;
-      for (const b of sec.bullets) {
-        // bullet dot
-        doc.text('•', tx, cy, { width: dotW, align: 'center' });
-        // bullet text
-        doc.text(b, tx + dotW, cy, { width: tw - dotW, lineGap: 0.3 });
-        const bh = doc.heightOfString(b, { width: tw - dotW, lineGap: 0.3 });
-        cy += Math.max(10, bh + 2);
+        bodyFont();
+        const dotW = 9;
+        for (const b of sec.bullets) {
+          doc.text('•', tx, cy, { width: dotW, align: 'center' });
+          doc.text(b, tx + dotW, cy, { width: tw - dotW, lineGap: 0.3 });
+          const bh = doc.heightOfString(b, { width: tw - dotW, lineGap: 0.3 });
+          cy += Math.max(10, bh + 2);
+        }
+
+        cy += 4;
       }
+      return cy;
+    };
 
-      cy += 4; // spacing after section
-    }
-    return cy; // bottom Y
-  };
+    const startY = y;
 
-  // Keep columns aligned to the same starting Y
-  const startY = y;
+    const leftSections = [
+      {
+        title: 'Response Targets',
+        bullets: [
+          'P1 Outage: initial response ≤ 2 business hours; restore target ≤ 8 hours.',
+          'P2 Major fault: initial response ≤ 4 business hours; restore target ≤ 1 business day.',
+          'P3 / MAC (moves/adds/changes): response ≤ 1 business day; restore/complete within 2–3 business days.'
+        ]
+      },
+      {
+        title: 'Availability & Maintenance',
+        bullets: [
+          'Hosted PBX platform target availability: 99.5% per calendar month.',
+          'Planned maintenance communicated ≥ 48 hours in advance and scheduled after-hours where feasible.'
+        ]
+      }
+    ];
+    const leftBottom = writeColumn(leftX, startY, colW, leftSections);
 
-  // LEFT COLUMN
-  const leftSections = [
-    {
-      title: 'Response Targets',
-      bullets: [
-        'P1 Outage: initial response ≤ 2 business hours; restore target ≤ 8 hours.',
-        'P2 Major fault: initial response ≤ 4 business hours; restore target ≤ 1 business day.',
-        'P3 / MAC (moves/adds/changes): response ≤ 1 business day; restore/complete within 2–3 business days.'
-      ]
-    },
-    {
-      title: 'Availability & Maintenance',
-      bullets: [
-        'Hosted PBX platform target availability: 99.5% per calendar month.',
-        'Planned maintenance communicated ≥ 48 hours in advance and scheduled after-hours where feasible.'
-      ]
-    }
-  ];
-  const leftBottom = writeColumn(leftX, startY, colW, leftSections);
+    const rightSections = [
+      {
+        title: 'Scope & Exclusions',
+        bullets: [
+          'Remote support is primary. Onsite only if remote resolution is not possible (call-out fees may apply).',
+          'Excludes: customer LAN/Wi-Fi/cabling, premises power, local ISP faults, third-party carrier outages, and force majeure.',
+          'Customer availability is required for remote sessions and onsite scheduling.'
+        ]
+      },
+      {
+        title: 'Escalation',
+        bullets: [
+          'If not resolved within targets, escalate to onsite (fees may apply).',
+          'Progress updates are provided until resolution.'
+        ]
+      }
+    ];
+    const rightBottom = writeColumn(rightX, startY, colW, rightSections);
 
-  // RIGHT COLUMN
-  const rightSections = [
-    {
-      title: 'Scope & Exclusions',
-      bullets: [
-        'Remote support is primary. Onsite only if remote resolution is not possible (call-out fees may apply).',
-        'Excludes: customer LAN/Wi-Fi/cabling, premises power, local ISP faults, third-party carrier outages, and force majeure.',
-        'Customer availability is required for remote sessions and onsite scheduling.'
-      ]
-    },
-    {
-      title: 'Escalation',
-      bullets: [
-        'If not resolved within targets, escalate to onsite (fees may apply).',
-        'Progress updates are provided until resolution.'
-      ]
-    }
-  ];
-  const rightBottom = writeColumn(rightX, startY, colW, rightSections);
+    y = Math.max(leftBottom, rightBottom) + 6;
+  }, { minHeight: 96, headerH: 18, gapAfter: 8 });
 
-  // Advance global y to the lower of the two columns + padding
-  y = Math.max(leftBottom, rightBottom) + 6;
-}, { minHeight: 96, headerH: 18, gapAfter: 8 });
-
-
-  // Footer Page 1 (with Agreement No)
+  // Footer Page 1
   footer(1, true);
 
   // =========================
@@ -527,11 +580,7 @@ drawCard('Response Time & Downtime Policy', ({ x, w }) => {
       moveY(16);
     };
 
-    const fillTwoUp = (
-      labelA, presetA = '', widthA = 120,
-      labelB, presetB = '', widthB = 140,
-      gap = 24
-    ) => {
+    const fillTwoUp = (labelA, presetA = '', widthA = 120, labelB, presetB = '', widthB = 140, gap = 24) => {
       if (!hasSpace(18)) return;
       const lxA = box.x + labelW;
       doc.font('Helvetica').fontSize(8).fillColor(MUTED)
@@ -632,12 +681,11 @@ drawCard('Response Time & Downtime Policy', ({ x, w }) => {
 
   // Client initials bottom of page 2
   {
-    const initials2Y = pageBottom() - FOOTER_H - 8;
+    const initials2Y = doc.page.height - doc.page.margins.bottom - FOOTER_H - 8;
     doc.font('Helvetica').fontSize(8).fillColor(MUTED).text('Client Initials:', L, initials2Y, { width: 90 });
     doc.moveTo(L + 70, initials2Y + 10).lineTo(L + 170, initials2Y + 10).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
   }
 
-  // Footer Page 2 (NO Agreement No)
   footer(2, false);
 
   // =========================
@@ -645,12 +693,11 @@ drawCard('Response Time & Downtime Policy', ({ x, w }) => {
   // =========================
   await newPageWithHeader('Terms & Conditions', { subtitle: '', showLogo: false });
 
-  // Two-column layout
   const COL_GAP = 22;
   const COL_W = (W - COL_GAP) / 2;
   const colX = (i) => L + i * (COL_W + COL_GAP);
   const colTop = y;
-  const colBottom = pageBottom() - FOOTER_H - 12;
+  const colBottom = doc.page.height - doc.page.margins.bottom - FOOTER_H - 12;
   let colYs = [colTop, colTop];
 
   const tryWriteSection = (colIndex, title, bullets) => {
@@ -691,7 +738,6 @@ drawCard('Response Time & Downtime Policy', ({ x, w }) => {
     return true;
   };
 
-  // NOTE: "Support & Service Levels" lives on Page 1 now
   const sections = [
     {
       title: 'Fees, Billing & Payments',
@@ -791,13 +837,12 @@ drawCard('Response Time & Downtime Policy', ({ x, w }) => {
 
   // Client initials bottom of page 3
   {
-    const initials3Y = pageBottom() - FOOTER_H - 8;
+    const initials3Y = doc.page.height - doc.page.margins.bottom - FOOTER_H - 8;
     doc.font('Helvetica').fontSize(8).fillColor(MUTED)
       .text('Client Initials:', L, initials3Y, { width: 90 });
     doc.moveTo(L + 70, initials3Y + 10).lineTo(L + 170, initials3Y + 10).strokeColor('#9CA3AF').lineWidth(0.8).stroke();
   }
 
-  // Footer Page 3 (NO Agreement No)
   footer(3, false);
 
   // ---- finalize & return buffer ----
