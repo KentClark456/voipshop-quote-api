@@ -479,19 +479,20 @@ export async function buildSlaPdfBuffer(params = {}) {
 
       let qtyCell, unitCell, lineTotal, desc;
       if (isCalls) {
-        // MIRROR QUOTE — Qty shows minutes; Unit shows Rxxx / {bundle}m
-        const minsForRow = isPayg ? 0 : minutes;
-        const bundles    = (bundleSize > 0) ? (minsForRow / bundleSize) : 0;
-        qtyCell   = String(minsForRow || 0);
-        unitCell  = isPayg ? 'minutes' : `${money(unit)} / ${bundleSize}m`;
-        lineTotal = isPayg ? 0 : (unit * bundles);
-        desc      = minsForRow ? `${name} — ${minsForRow} minutes` : `${name} — Pay-as-you-go`;
-      } else {
-        qtyCell   = String(Math.max(0, qty));
-        unitCell  = unit > 0 ? money(unit) : '—';
-        lineTotal = unit * Math.max(0, qty);
-        desc      = name;
-      }
+ // Qty shows minutes; Unit shows just Rxxx (no "/ {bundle}m")
+const minsForRow = isPayg ? 0 : minutes;
+const bundles    = (bundleSize > 0) ? (minsForRow / bundleSize) : 0;
+qtyCell   = String(minsForRow || 0);
+unitCell  = isPayg ? 'minutes' : money(unit);
+lineTotal = isPayg ? 0 : (unit * bundles);
+desc      = minsForRow ? `${name} — ${minsForRow} minutes` : `${name} — Pay-as-you-go`;
+} else {
+  qtyCell   = String(Math.max(0, qty));
+  unitCell  = unit > 0 ? money(unit) : '—';
+  lineTotal = unit * Math.max(0, qty);
+  desc      = name;
+}
+
 
       subtotal += Number.isFinite(lineTotal) ? lineTotal : 0;
 

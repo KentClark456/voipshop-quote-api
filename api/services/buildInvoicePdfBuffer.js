@@ -363,12 +363,13 @@ export async function buildInvoicePdfBuffer(q = {}) {
           amount = 0;
           desc = `${name} — 0 minutes (Pay-as-you-go)`;
         } else {
-          // Mirror QUOTE behavior: show minutes as Qty; Unit = Rxxx / {bundleSize}m
-          qtyVal = minutesForRow;
-          unitDisplay = `${money(unitRForBundle)} / ${bundleSize}m`;
-          const bundles = (bundleSize > 0) ? (minutesForRow / bundleSize) : 0;
-          amount = (Number.isFinite(bundles) ? bundles : 0) * unitRForBundle;
-          desc = `${name} — ${minutesForRow} minutes`;
+        // Show minutes as Qty; Unit shows just Rxxx (no "/ 250m")
+qtyVal = minutesForRow;
+unitDisplay = money(unitRForBundle);
+const bundles = (bundleSize > 0) ? (minutesForRow / bundleSize) : 0;
+amount = (Number.isFinite(bundles) ? bundles : 0) * unitRForBundle;
+desc = `${name} — ${minutesForRow} minutes`;
+
         }
       } else {
         // Non-calls: regular qty × unit
