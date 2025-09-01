@@ -71,18 +71,42 @@ export async function buildInvoicePdfBuffer(q = {}) {
   const ensureSpace = (need, yPos = doc.y) => (yPos <= pageBottom() - (need + FOOTER_H));
   const spaceLeft  = () => (pageBottom() - FOOTER_H - doc.y);
 
-  // ---- Minutes package (aligned with SLA/Quote) ----
-  const minutesPackage = (() => {
+  // ---- Minutes resolver (mirrors Quote; robust fallbacks) ----
+  const resolveMinutesContext = (qObj = {}) => {
+    // 1) Prefer explicit minutesPackage from various places
     const mp =
-      q?.minutesPackage ||
-      q?.checkout?.minutesPackage ||
-      q?.cart?.minutesPackage ||
+      qObj?.minutesPackage ||
+      qObj?.checkout?.minutesPackage ||
+      qObj?.cart?.minutesPackage ||
       null;
-    const bundleSize = Number(mp?.bundleSize) > 0 ? Number(mp.bundleSize) : 250;
-    const unitR = Number(mp?.unitR) > 0 ? Number(mp.unitR) : 100; // R per bundle (ex VAT display baseline)
-    const minutes = Number(mp?.minutes) > 0 ? Number(mp.minutes) : 0;
-    return { bundleSize, unitR, minutes, has: !!mp };
-  })();
+
+    const mpBundleSize = Number(mp?.bundleSize) > 0 ? Number(mp.bundleSize) : 250;
+    const mpUnitR      = Number(mp?.unitR)      > 0 ? Number(mp.unitR)      : 100;
+    const mpMinutes    = Number(mp?.minutes)    > 0 ? Number(mp.minutes)    : 0;
+
+    // 2) Global minutes (loose fallbacks, same as Quote)
+    const globalMinutes =
+      Number(
+        qObj?.minutes ??
+        qObj?.monthlyControls?.minutes ??
+        qObj?.meta?.minutes ??
+        qObj?.meta?.minutesIncluded ??
+        qObj?.controls?.minutes ??
+        0
+      ) || 0;
+
+    // 3) Final minutes = explicit package minutes OR global minutes
+    const finalMinutes = mpMinutes > 0 ? mpMinutes : globalMinutes;
+
+    return {
+      hasPkg: !!mp,
+      minutes: finalMinutes,                // resolved minutes
+      bundleSize: mpBundleSize,             // per-bundle minutes
+      unitR: mpUnitR                        // R per bundle (ex VAT baseline; display)
+    };
+  };
+
+  const minutesCtx = resolveMinutesContext(q);
 
   // Optional stamp
   const paintStamp = (text) => {
@@ -119,71 +143,72 @@ export async function buildInvoicePdfBuffer(q = {}) {
     .text(`Date: ${datePretty}`,                 L, undefined, { width: W, align: 'right' })
     .text(`Valid: ${Number(q.validDays ?? 7)} days`, L, undefined, { width: W, align: 'right' });
 
-// --- Banking Details (top-right) + Company/Client (left) with safe header clearance ---
-{
-  // After the "Invoice / Date / Valid" lines above, capture how far down we are:
-  const metaBottom = doc.y;
+  // --- Banking Details (top-right) + Company/Client (left) with safe header clearance ---
+  {
+    // After the "Invoice / Date / Valid" lines above, capture how far down we are:
+    const metaBottom = doc.y;
 
-  // Keep a conservative gap under logo/header so we never overlap either side
-  const SAFE_HEADER_CLEARANCE = 72; // tweak to 80–90 if your logo is taller
-  const infoTop = Math.max(metaBottom + 8, headerTop + SAFE_HEADER_CLEARANCE);
+    // Keep a conservative gap under logo/header so we never overlap either side
+    const SAFE_HEADER_CLEARANCE = 72; // tweak to 80–90 if your logo is taller
+    const infoTop = Math.max(metaBottom + 8, headerTop + SAFE_HEADER_CLEARANCE);
 
-  // Right column: Banking details panel
-  const bankBoxW = 260;
-  const bankX = R - bankBoxW;
-  const bankY = infoTop;
-  const bankBoxH = 86; // adjust if you add/remove lines
+    // Right column: Banking details panel
+    const bankBoxW = 260;
+    const bankX = R - bankBoxW;
+    const bankY = infoTop;
+    const bankBoxH = 86; // adjust if you add/remove lines
 
-  // Panel
-  doc.save().roundedRect(bankX, bankY, bankBoxW, bankBoxH, 10).fill('#F9FAFB').restore();
-  doc.roundedRect(bankX, bankY, bankBoxW, bankBoxH, 10).strokeColor(line).stroke();
+    // Panel
+    doc.save().roundedRect(bankX, bankY, bankBoxW, bankBoxH, 10).fill('#F9FAFB').restore();
+    doc.roundedRect(bankX, bankY, bankBoxW, bankBoxH, 10).strokeColor(line).stroke();
 
-  // Title
-  doc.font('Helvetica-Bold').fontSize(9.5).fillColor(ink)
-     .text('Banking Details', bankX + 12, bankY + 8, { width: bankBoxW - 24 });
+    // Title
+    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(ink)
+      .text('Banking Details', bankX + 12, bankY + 8, { width: bankBoxW - 24 });
 
-  // Details
-  doc.font('Helvetica').fontSize(8.5).fillColor(ink);
-  const rowX = bankX + 12, rowW = bankBoxW - 24, rowStartY = bankY + 26;
-  doc.text('Umojanet (Pty) Ltd t/a Voipshop', rowX, rowStartY, { width: rowW });
-  doc.text('Bank: Capitec Business',          rowX, undefined,  { width: rowW });
-  doc.text('Account Number: 2100282464',      rowX, undefined,  { width: rowW });
-  doc.text('Branch Code: 470010',             rowX, undefined,  { width: rowW });
-  doc.text(`Reference: ${q.invoiceNumber || '[Invoice Number]'}`, rowX, undefined, { width: rowW });
+    // Details
+    doc.font('Helvetica').fontSize(8.5).fillColor(ink);
+    const rowX = bankX + 12, rowW = bankBoxW - 24, rowStartY = bankY + 26;
+    doc.text('Umojanet (Pty) Ltd t/a Voipshop', rowX, rowStartY, { width: rowW });
+    doc.text('Bank: Capitec Business',          rowX, undefined,  { width: rowW });
+    doc.text('Account Number: 2100282464',      rowX, undefined,  { width: rowW });
+    doc.text('Branch Code: 470010',             rowX, undefined,  { width: rowW });
+    doc.text(`Reference: ${q.invoiceNumber || '[Invoice Number]'}`, rowX, undefined, { width: rowW });
 
-  const rightColumnBottom = bankY + bankBoxH;
+    const rightColumnBottom = bankY + bankBoxH;
 
-  // Left column: Company + Bill To (aligned to same safe top)
-  const gutter = 12;
-  const leftW  = W - bankBoxW - gutter;
+    // Left column: Company + Bill To (aligned to same safe top)
+    const gutter = 12;
+    const leftW  = W - bankBoxW - gutter;
 
-  doc.y = infoTop;
+    doc.y = infoTop;
 
-  if (q.company?.name) {
-    doc.font('Helvetica-Bold').fontSize(11.5).fillColor(ink)
-      .text(q.company.name, L, doc.y, { width: leftW });
+    if (q.company?.name) {
+      doc.font('Helvetica-Bold').fontSize(11.5).fillColor(ink)
+        .text(q.company.name, L, doc.y, { width: leftW });
+    }
+    doc.font('Helvetica').fontSize(9.5).fillColor(gray6)
+      .text(q.company?.address || '', L, undefined, { width: leftW })
+      .text(
+        `${q.company?.phone || ''}${q.company?.email ? ' • ' + q.company.email : ''}`,
+        L, undefined, { width: leftW }
+      );
+
+    // Client block
+    doc.moveDown(0.6);
+    doc.font('Helvetica-Bold').fontSize(10.5).fillColor(ink)
+      .text('Bill To', L, undefined, { width: leftW });
+    doc.font('Helvetica').fontSize(9.5).fillColor(ink)
+      .text(q.client?.name || '',    L, undefined, { width: leftW })
+      .text(q.client?.company || '', L, undefined, { width: leftW })
+      .text(q.client?.email || '',   L, undefined, { width: leftW })
+      .text(q.client?.phone || '',   L, undefined, { width: leftW })
+      .text(q.client?.address || '', L, undefined, { width: leftW });
+
+    // Advance below whichever column is taller
+    doc.y = Math.max(doc.y, rightColumnBottom) + 12;
   }
-  doc.font('Helvetica').fontSize(9.5).fillColor(gray6)
-    .text(q.company?.address || '', L, undefined, { width: leftW })
-    .text(
-      `${q.company?.phone || ''}${q.company?.email ? ' • ' + q.company.email : ''}`,
-      L, undefined, { width: leftW }
-    );
 
-  // Client block
-  doc.moveDown(0.6);
-  doc.font('Helvetica-Bold').fontSize(10.5).fillColor(ink)
-    .text('Bill To', L, undefined, { width: leftW });
-  doc.font('Helvetica').fontSize(9.5).fillColor(ink)
-    .text(q.client?.name || '',    L, undefined, { width: leftW })
-    .text(q.client?.company || '', L, undefined, { width: leftW })
-    .text(q.client?.email || '',   L, undefined, { width: leftW })
-    .text(q.client?.phone || '',   L, undefined, { width: leftW })
-    .text(q.client?.address || '', L, undefined, { width: leftW });
-
-  // Advance below whichever column is taller
-  doc.y = Math.max(doc.y, rightColumnBottom) + 12;
-}
   // Totals math
   const vatRate = Number(q.company?.vatRate ?? 0.15);
   const onceSub = Number(q.subtotals?.onceOff || 0);
@@ -195,38 +220,30 @@ export async function buildInvoicePdfBuffer(q = {}) {
   const grandPayNow = onceTotal + monTotal;
 
   // Summary cards
-  const yStart = doc.y + 10;
-  const gap = 10;
-  const cardH = 40;
-  const cardW = (W - gap) / 2;
+  {
+    const yStart = doc.y + 10;
+    const gap = 10;
+    const cardH = 40;
+    const cardW = (W - gap) / 2;
 
-  if (ensureSpace(cardH + 12, yStart)) {
-    const card = (x, y, w, h, title, valueTxt, subtitle) => {
-      doc.save().roundedRect(x, y, w, h, 10).fill(pill).restore();
-      doc.roundedRect(x, y, w, h, 10).strokeColor(line).stroke();
-      doc.font('Helvetica').fontSize(8.6).fillColor(gray6).text(title, x + 10, y + 6);
-      doc.font('Helvetica-Bold').fontSize(12.5).fillColor(ink).text(valueTxt, x + 10, y + 21);
-      if (subtitle) {
-        doc.font('Helvetica').fontSize(8.4).fillColor(gray6)
-          .text(subtitle, x + w - 62, y + 21, { width: 52, align: 'right' });
-      }
-    };
-    card(L, yStart, cardW, cardH, 'MONTHLY', money(monTotal), '/month');
-    card(L + cardW + gap, yStart, cardW, cardH, 'ONCE-OFF', money(onceTotal), 'setup');
-    doc.y = yStart + cardH + 12; // give more air after cards
+    if (ensureSpace(cardH + 12, yStart)) {
+      const card = (x, y, w, h, title, valueTxt, subtitle) => {
+        doc.save().roundedRect(x, y, w, h, 10).fill(pill).restore();
+        doc.roundedRect(x, y, w, h, 10).strokeColor(line).stroke();
+        doc.font('Helvetica').fontSize(8.6).fillColor(gray6).text(title, x + 10, y + 6);
+        doc.font('Helvetica-Bold').fontSize(12.5).fillColor(ink).text(valueTxt, x + 10, y + 21);
+        if (subtitle) {
+          doc.font('Helvetica').fontSize(8.4).fillColor(gray6)
+            .text(subtitle, x + w - 62, y + 21, { width: 52, align: 'right' });
+        }
+      };
+      card(L, yStart, cardW, cardH, 'MONTHLY', money(monTotal), '/month');
+      card(L + cardW + gap, yStart, cardW, cardH, 'ONCE-OFF', money(onceTotal), 'setup');
+      doc.y = yStart + cardH + 12; // give more air after cards
+    }
   }
 
-  // Global minutes fallback (as a last resort)
-  const globalMinutes = Number(
-    q?.minutes ??
-    q?.monthlyControls?.minutes ??
-    q?.meta?.minutes ??
-    q?.meta?.minutesIncluded ??
-    q?.controls?.minutes ??
-    0
-  );
-
-  // Inject a Calls line if monthly section lacks one but minutesPackage is present
+  // Inject a Calls line if monthly section lacks one, using the resolved minutes
   const synthMonthlyItems = (items = []) => {
     const arr = Array.isArray(items) ? [...items] : [];
     const hasCalls = arr.some((it) => {
@@ -234,188 +251,184 @@ export async function buildInvoicePdfBuffer(q = {}) {
       return Boolean(it?.isCalls) || /\bcalls?\b/.test(name) || /min(ute)?s?/.test(name);
     });
 
-    if (!hasCalls && minutesPackage.has) {
+    if (!hasCalls && (minutesCtx.hasPkg || minutesCtx.minutes > 0)) {
       arr.push({
         name: 'Calls',
         isCalls: true,
-        minutes: Number(minutesPackage.minutes) || 0,
-        bundleSize: Number(minutesPackage.bundleSize) || 250,
-        unit: Number(minutesPackage.unitR) || 100 // R per bundle
+        minutes: Number(minutesCtx.minutes) || 0,
+        bundleSize: Number(minutesCtx.bundleSize) || 250,
+        unit: Number(minutesCtx.unitR) || 100 // R per bundle
       });
     }
     return arr;
   };
 
-// TABLE (compact, one page)
-const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
-  const colW = [ W * 0.58, W * 0.12, W * 0.12, W * 0.18 ];
-  const headH = 16;
-  const rowH  = 16; // slim rows
+  // TABLE (compact, one page)
+  const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
+    const colW = [ W * 0.58, W * 0.12, W * 0.12, W * 0.18 ];
+    const headH = 16;
+    const rowH  = 16; // slim rows
 
-  // --- Title (measure & advance before header so it never gets overlapped) ---
-  let y = doc.y + 10; // extra breathing room before the title
-  if (!ensureSpace(24, y)) return;
+    // --- Title (measure & advance before header so it never gets overlapped) ---
+    let y = doc.y + 10; // extra breathing room before the title
+    if (!ensureSpace(24, y)) return;
 
-  doc.font('Helvetica-Bold').fontSize(11.5).fillColor(ink).text(title, L, y, { width: W });
+    doc.font('Helvetica-Bold').fontSize(11.5).fillColor(ink).text(title, L, y, { width: W });
 
-  // make sure we move BELOW the rendered title height (safest against overlaps)
-  const titleH = doc.heightOfString(title, { width: W });
-  y = Math.max(doc.y, y + titleH) + 6;
+    // make sure we move BELOW the rendered title height (safest against overlaps)
+    const titleH = doc.heightOfString(title, { width: W });
+    y = Math.max(doc.y, y + titleH) + 6;
 
-  // --- Header ---
-  if (!ensureSpace(headH + 2, y)) return;
-  doc.save().rect(L, y, W, headH).fill(thbg).restore();
-  doc.font('Helvetica-Bold').fontSize(9.5).fillColor(ink);
-  const headY = y + 3;
-  doc.text('Description', L + 8, headY, { width: colW[0] - 10 });
-  doc.text('Qty',         L + colW[0], headY, { width: colW[1], align: 'right' });
-  doc.text('Unit',        L + colW[0] + colW[1], headY, { width: colW[2], align: 'right' });
-  doc.text('Amount',      L + colW[0] + colW[1] + colW[2], headY, { width: colW[3], align: 'right' });
-  doc.moveTo(L, y + headH).lineTo(R, y + headH).strokeColor(line).stroke();
-  y += headH + 1;
+    // --- Header ---
+    if (!ensureSpace(headH + 2, y)) return;
+    doc.save().rect(L, y, W, headH).fill(thbg).restore();
+    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(ink);
+    const headY = y + 3;
+    doc.text('Description', L + 8, headY, { width: colW[0] - 10 });
+    doc.text('Qty',         L + colW[0], headY, { width: colW[1], align: 'right' });
+    doc.text('Unit',        L + colW[0] + colW[1], headY, { width: colW[2], align: 'right' });
+    doc.text('Amount',      L + colW[0] + colW[1] + colW[2], headY, { width: colW[3], align: 'right' });
+    doc.moveTo(L, y + headH).lineTo(R, y + headH).strokeColor(line).stroke();
+    y += headH + 1;
 
-  // Body
-  doc.font('Helvetica').fontSize(9).fillColor(ink);
-  const zebra = ['#ffffff', '#fbfdff'];
-  let rowIndex = 0;
-  let hiddenCount = 0;
+    // Body
+    doc.font('Helvetica').fontSize(9).fillColor(ink);
+    const zebra = ['#ffffff', '#fbfdff'];
+    let rowIndex = 0;
+    let hiddenCount = 0;
 
-  const safeGlobalMinutes = Number.isFinite(Number(globalMinutes)) ? Number(globalMinutes) : 0;
+    const itemsArrBase = Array.isArray(items) ? items : [];
+    const itemsArr = monthly ? synthMonthlyItems(itemsArrBase) : itemsArrBase;
 
-  const itemsArrBase = Array.isArray(items) ? items : [];
-  const itemsArr = monthly ? synthMonthlyItems(itemsArrBase) : itemsArrBase;
+    for (let i = 0; i < itemsArr.length; i++) {
+      // Need space for at least 1 row + totals later
+      if (!ensureSpace(110, y)) { hiddenCount = itemsArr.length - i; break; }
 
-  for (let i = 0; i < itemsArr.length; i++) {
-    // Need space for at least 1 row + totals later
-    if (!ensureSpace(110, y)) { hiddenCount = itemsArr.length - i; break; }
+      const it = itemsArr[i] || {};
+      const name = typeof it.name === 'string' ? it.name : String(it.name ?? '');
+      const nameLower = name.toLowerCase();
 
-    const it = itemsArr[i] || {};
-    const name = typeof it.name === 'string' ? it.name : String(it.name ?? '');
-    const nameLower = name.toLowerCase();
+      const unitRaw = Number(it.unit);
+      const qtyRaw  = Number(it.qty);
 
-    const unitRaw = Number(it.unit);
-    const qtyRaw  = Number(it.qty);
+      // Detect calls/minutes line
+      const looksLikeCalls =
+        Boolean(it.isCalls) ||
+        /(?:^|\b)(?:calls?|minutes?|bundle)\b/i.test(name);
 
-    // Detect calls/minutes line
-    const looksLikeCalls =
-      Boolean(it.isCalls) ||
-      /(?:^|\b)(?:calls?|minutes?|bundle)\b/i.test(name);
+      // Read minutes from tags first
+      const minuteCandidates = [
+        it.minutes, it.qtyMinutes, it.minutesIncluded, it.includedMinutes,
+        it.qty_min, it.qty_mins, it.qtyMin, it.qtyMins, it.bundleMinutes
+      ];
+      let itemMinutes = minuteCandidates
+        .map(n => Number(n))
+        .find(n => Number.isFinite(n) && n > 0) || 0;
 
-    // Read minutes from tags first
-    const minuteCandidates = [
-      it.minutes, it.qtyMinutes, it.minutesIncluded, it.includedMinutes,
-      it.qty_min, it.qty_mins, it.qtyMin, it.qtyMins, it.bundleMinutes
-    ];
-    let itemMinutes = minuteCandidates
-      .map(n => Number(n))
-      .find(n => Number.isFinite(n) && n > 0) || 0;
-
-    // If still not present, try parsing from the name
-    if (!itemMinutes) {
-      const m = name.match(/(\d{2,5})\s*(?:mins?|minutes?)\b/i)
-             || name.match(/\bbundle\s*(\d{2,5})\b/i)
-             || name.match(/\bx\s*(\d{2,5})\b/i);
-      if (m && Number(m[1]) > 0) itemMinutes = Number(m[1]);
-    }
-
-    // Final minutes value per row
-    const minutesForRow = itemMinutes > 0
-      ? itemMinutes
-      : (looksLikeCalls
-          ? (Number(minutesPackage.minutes) || Number(safeGlobalMinutes) || 0)
-          : 0);
-
-    // PAYG detection → force 0 minutes and R0
-    const isPayg = looksLikeCalls && (
-      /pay[-\s]?as[-\s]?you[-\s]?go/i.test(nameLower) ||
-      Number(minutesForRow) <= 0 ||
-      Number(qtyRaw) <= 0
-    );
-
-    // Bundle settings / unitR for calls
-    const bundleSize = looksLikeCalls
-      ? (Number(it.bundleSize) > 0 ? Number(it.bundleSize) : Number(minutesPackage.bundleSize) || 250)
-      : 0;
-
-    const unitRForBundle = looksLikeCalls
-      ? (Number(unitRaw) > 0 ? Number(unitRaw) : Number(minutesPackage.unitR) || 100)
-      : (Number(unitRaw) > 0 ? Number(unitRaw) : 0);
-
-    // Compute Qty / Unit / Amount + description
-    let qtyVal, unitDisplay, amount, desc;
-
-    if (looksLikeCalls) {
-      if (isPayg) {
-        qtyVal = 0;
-        unitDisplay = 'minutes';
-        amount = 0;
-        desc = `${name} — 0 minutes (Pay-as-you-go)`;
-      } else {
-        // show minutes as qty; unit shows Rxxx / {bundleSize}m
-        qtyVal = minutesForRow;
-        unitDisplay = `${money(unitRForBundle)} / ${bundleSize}m`;
-        const bundles = (bundleSize > 0) ? (minutesForRow / bundleSize) : 0;
-        amount = (Number.isFinite(bundles) ? bundles : 0) * unitRForBundle;
-        desc = `${name} — ${minutesForRow} minutes`;
+      // If still not present, try parsing from the name
+      if (!itemMinutes) {
+        const m = name.match(/(\d{2,5})\s*(?:mins?|minutes?)\b/i)
+               || name.match(/\bbundle\s*(\d{2,5})\b/i)
+               || name.match(/\bx\s*(\d{2,5})\b/i);
+        if (m && Number(m[1]) > 0) itemMinutes = Number(m[1]);
       }
-    } else {
-      // Non-calls: regular qty × unit
-      qtyVal = Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1;
-      unitDisplay = money(unitRForBundle);
-      amount = unitRForBundle * qtyVal;
-      desc = name;
+
+      // Final minutes value per row
+      const minutesForRow = itemMinutes > 0
+        ? itemMinutes
+        : (looksLikeCalls ? Number(minutesCtx.minutes) || 0 : 0);
+
+      // PAYG detection
+      const isPayg = looksLikeCalls && (
+        /pay[-\s]?as[-\s]?you[-\s]?go/i.test(nameLower) ||
+        Number(minutesForRow) <= 0
+      );
+
+      // Bundle settings / unitR for calls
+      const bundleSize = looksLikeCalls
+        ? (Number(it.bundleSize) > 0 ? Number(it.bundleSize) : Number(minutesCtx.bundleSize) || 250)
+        : 0;
+
+      const unitRForBundle = looksLikeCalls
+        ? (Number(unitRaw) > 0 ? Number(unitRaw) : Number(minutesCtx.unitR) || 100)
+        : (Number(unitRaw) > 0 ? Number(unitRaw) : 0);
+
+      // Compute Qty / Unit / Amount + description
+      let qtyVal, unitDisplay, amount, desc;
+
+      if (looksLikeCalls) {
+        if (isPayg) {
+          qtyVal = 0;
+          unitDisplay = 'minutes';
+          amount = 0;
+          desc = `${name} — 0 minutes (Pay-as-you-go)`;
+        } else {
+          // Mirror QUOTE behavior: show minutes as Qty; Unit = Rxxx / {bundleSize}m
+          qtyVal = minutesForRow;
+          unitDisplay = `${money(unitRForBundle)} / ${bundleSize}m`;
+          const bundles = (bundleSize > 0) ? (minutesForRow / bundleSize) : 0;
+          amount = (Number.isFinite(bundles) ? bundles : 0) * unitRForBundle;
+          desc = `${name} — ${minutesForRow} minutes`;
+        }
+      } else {
+        // Non-calls: regular qty × unit
+        qtyVal = Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1;
+        unitDisplay = money(unitRForBundle);
+        amount = unitRForBundle * qtyVal;
+        desc = name;
+      }
+
+      if (!Number.isFinite(amount)) amount = 0;
+
+      // Row bg
+      doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
+      rowIndex++;
+
+      const rowTextY = y + 3;
+      doc.text(desc,                L + 8,                       rowTextY, { width: colW[0] - 10 });
+      doc.text(String(qtyVal || 0), L + colW[0],                 rowTextY, { width: colW[1], align: 'right' });
+      doc.text(unitDisplay,         L + colW[0] + colW[1],       rowTextY, { width: colW[2], align: 'right' });
+      doc.text(money(amount),       L + colW[0] + colW[1] + colW[2], rowTextY, { width: colW[3], align: 'right' });
+
+      y += rowH;
     }
 
-    if (!Number.isFinite(amount)) amount = 0;
+    // Hidden rows notice
+    if (hiddenCount > 0 && ensureSpace(rowH + 36, y)) {
+      doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
+      doc.font('Helvetica-Oblique').fontSize(9).fillColor(gray6)
+        .text(`+ ${hiddenCount} more item${hiddenCount > 1 ? 's' : ''} included in totals`,
+              L + 8, y + 3, { width: W - 16 });
+      y += rowH;
+    }
 
-    // Row bg
-    doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
-    rowIndex++;
+    // Totals
+    if (ensureSpace(50, y)) {
+      doc.moveTo(L, y).lineTo(R, y).strokeColor(line).stroke();
+      y += 6;
 
-    const rowTextY = y + 3;
-    doc.text(desc,                L + 8,                       rowTextY, { width: colW[0] - 10 });
-    doc.text(String(qtyVal || 0), L + colW[0],                 rowTextY, { width: colW[1], align: 'right' });
-    doc.text(unitDisplay,         L + colW[0] + colW[1],       rowTextY, { width: colW[2], align: 'right' });
-    doc.text(money(amount),       L + colW[0] + colW[1] + colW[2], rowTextY, { width: colW[3], align: 'right' });
+      const labelW = 124;
+      const valW   = 104;
+      const valX   = R - valW;
+      const labelX = valX - labelW - 8;
 
-    y += rowH;
-  }
+      const totalLine = (label, val, bold = false) => {
+        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(9.4).fillColor(bold ? ink : gray6)
+          .text(label, labelX, y, { width: labelW, align: 'right' });
+        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(ink)
+          .text(money(val), valX, y, { width: valW, align: 'right' });
+        y += 12;
+      };
 
-  // Hidden rows notice
-  if (hiddenCount > 0 && ensureSpace(rowH + 36, y)) {
-    doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
-    doc.font('Helvetica-Oblique').fontSize(9).fillColor(gray6)
-      .text(`+ ${hiddenCount} more item${hiddenCount > 1 ? 's' : ''} included in totals`,
-            L + 8, y + 3, { width: W - 16 });
-    y += rowH;
-  }
+      totalLine('Subtotal', subtotalEx);
+      totalLine(`VAT (${Math.round(vatRate * 100)}%)`, vatAmt);
+      // Polished labels to include VAT mention (like Quote)
+      totalLine(monthly ? 'Total / month (incl VAT)' : 'Total (once-off, incl VAT)', totalInc, true);
+    }
 
-  // Totals
-  if (ensureSpace(50, y)) {
-    doc.moveTo(L, y).lineTo(R, y).strokeColor(line).stroke();
-    y += 6;
-
-    const labelW = 124;
-    const valW   = 104;
-    const valX   = R - valW;
-    const labelX = valX - labelW - 8;
-
-    const totalLine = (label, val, bold = false) => {
-      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(9.4).fillColor(bold ? ink : gray6)
-        .text(label, labelX, y, { width: labelW, align: 'right' });
-      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(ink)
-        .text(money(val), valX, y, { width: valW, align: 'right' });
-      y += 12;
-    };
-
-    totalLine('Subtotal', subtotalEx);
-    totalLine(`VAT (${Math.round(vatRate * 100)}%)`, vatAmt);
-    totalLine(monthly ? 'Total / month' : 'Total (once-off)', totalInc, true);
-  }
-
-  // Commit local y back to doc
-  doc.y = y + 2;
-};
+    // Commit local y back to doc
+    doc.y = y + 2;
+  };
 
   // Stamp (first page only)
   paintStamp(q.stamp);
@@ -425,30 +438,30 @@ const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
   doc.moveDown(0.4);
   table('Monthly Charges',  q.itemsMonthly || [], monSub,  monVat,  monTotal,  true);
 
-// Pay-now band (fixed slim height)
-if (ensureSpace(36)) {
-  const yBand = doc.y + 2;
-  const bandH = 26; // slim height
-  doc.save().roundedRect(L, yBand, W, bandH, 10).fill(pill).restore();
-  doc.roundedRect(L, yBand, W, bandH, 10).strokeColor(line).stroke();
-  doc.font('Helvetica-Bold').fontSize(11.5).fillColor(ink)
-    .text('Pay now (incl VAT)', L + 10, yBand + 8);
-  doc.font('Helvetica-Bold').fontSize(12).fillColor(ink)
-    .text(money(grandPayNow), L, yBand + 8, { width: W - 10, align: 'right' });
-  doc.y = yBand + bandH + 6;
-}
+  // Pay-now band (fixed slim height)
+  if (ensureSpace(36)) {
+    const yBand = doc.y + 2;
+    const bandH = 26; // slim height
+    doc.save().roundedRect(L, yBand, W, bandH, 10).fill(pill).restore();
+    doc.roundedRect(L, yBand, W, bandH, 10).strokeColor(line).stroke();
+    doc.font('Helvetica-Bold').fontSize(11.5).fillColor(ink)
+      .text('Pay now (incl VAT)', L + 10, yBand + 8);
+    doc.font('Helvetica-Bold').fontSize(12).fillColor(ink)
+      .text(money(grandPayNow), L, yBand + 8, { width: W - 10, align: 'right' });
+    doc.y = yBand + bandH + 6;
+  }
 
-// Notes (render only if they fit)
-const notes = [
-  'Included: Install & device setup • Remote support • PBX config • Porting assist. Std call-out: R450.',
-  q.notes ? `Notes: ${q.notes}` : '',
-  `Valid for ${Number(q.validDays ?? 7)} days. Pricing in ZAR.`
-].filter(Boolean).join('\n');
+  // Notes (render only if they fit)
+  const notes = [
+    'Included: Install & device setup • Remote support • PBX config • Porting assist. Std call-out: R450.',
+    q.notes ? `Notes: ${q.notes}` : '',
+    `Valid for ${Number(q.validDays ?? 7)} days. Pricing in ZAR.`
+  ].filter(Boolean).join('\n');
 
-const notesH = doc.heightOfString(notes, { width: W, align: 'left' });
-if (ensureSpace(notesH + 6)) {
-  doc.font('Helvetica').fontSize(9).fillColor(gray6).text(notes, L, doc.y, { width: W });
-}
+  const notesH = doc.heightOfString(notes, { width: W, align: 'left' });
+  if (ensureSpace(notesH + 6)) {
+    doc.font('Helvetica').fontSize(9).fillColor(gray6).text(notes, L, doc.y, { width: W });
+  }
 
   // Footer
   const yFooter = doc.page.height - FOOTER_H + 2;
