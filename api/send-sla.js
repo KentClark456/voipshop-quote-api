@@ -77,10 +77,8 @@ export default async function handler(req, res) {
     const pdf = await buildSlaPdfBuffer({
       company: {
         name: 'VoIP Shop',
-        reg: '2025/406791/07',
-        vat: '***',
         address: '23 Lombardy Road, Broadacres, Johannesburg',
-        phone: '+27 68 351 0074',
+        phone: '+27 67 922 8256',
         email: 'sales@voipshop.co.za',
         website: 'https://voipshop.co.za',
         logoUrl: 'https://voipshop.co.za/Assets/Group%201642logo%20(1).png'

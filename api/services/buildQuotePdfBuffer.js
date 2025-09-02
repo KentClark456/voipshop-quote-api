@@ -68,6 +68,19 @@ export async function buildQuotePdfBuffer(q = {}) {
   const FOOTER_H = 28;
   const ensureSpace = (need, yPos = doc.y) => (yPos <= pageBottom() - (need + FOOTER_H));
 
+  // ---- Minutes package (aligned with SLA) ----
+  const minutesPackage = (() => {
+    const mp =
+      q?.minutesPackage ||
+      q?.checkout?.minutesPackage ||
+      q?.cart?.minutesPackage ||
+      null;
+    const bundleSize = Number(mp?.bundleSize) > 0 ? Number(mp.bundleSize) : 250;
+    const unitR = Number(mp?.unitR) > 0 ? Number(mp.unitR) : 100; // R per bundle, ex VAT (display only)
+    const minutes = Number(mp?.minutes) > 0 ? Number(mp.minutes) : 0;
+    return { bundleSize, unitR, minutes, has: !!mp };
+  })();
+
   // Optional watermark
   const paintStamp = (text) => {
     if (!text) return;
@@ -126,55 +139,35 @@ export async function buildQuotePdfBuffer(q = {}) {
      .text(q.client?.phone || '', L, undefined, { width: W })
      .text(q.client?.address || '', L, undefined, { width: W });
 
-// ---- WHY CHOOSE US (benefits first)
-if (ensureSpace(90)) {
-  const cardYStart = doc.y + 10;   // where the card begins
-  const pad = 10;
+  // ---- WHY CHOOSE US (benefits first)
+  if (ensureSpace(90)) {
+    const cardYStart = doc.y + 10;
+    const pad = 10;
 
-  // Title
-  doc.font('Helvetica-Bold').fontSize(11).fillColor(ink)
-     .text('Why choose VoIP Shop', L + pad, cardYStart + 8, { width: W - pad * 2 });
+    doc.font('Helvetica-Bold').fontSize(11).fillColor(ink)
+       .text('Why choose VoIP Shop', L + pad, cardYStart + 8, { width: W - pad * 2 });
 
-  // Bullets helper
-  const bullet = (t) => {
-    const x = L + pad + 10;               // text start
-    const cy = doc.y + 4;                 // circle center (baseline-ish)
-    // dot
-    doc.save()
-       .circle(L + pad + 2.5, cy, 1.4)
-       .fill(gray6)
-       .restore();
-    // text
-    doc.fillColor(ink).font('Helvetica').fontSize(9.5)
-       .text(t, x, doc.y, { width: W - pad * 2 - 12, lineGap: 1 });
-    // small spacer between bullets
-    doc.y += 4;
-  };
+    const bullet = (t) => {
+      const x = L + pad + 10;
+      const cy = doc.y + 4;
+      doc.save().circle(L + pad + 2.5, cy, 1.4).fill(gray6).restore();
+      doc.fillColor(ink).font('Helvetica').fontSize(9.5)
+         .text(t, x, doc.y, { width: W - pad * 2 - 12, lineGap: 1 });
+      doc.y += 4;
+    };
 
-  // Move below the title line before bullets
-  doc.y = cardYStart + 28;
+    doc.y = cardYStart + 28;
+    bullet('Buy direct—no sales commissions baked into hardware pricing.');
+    bullet('Own your equipment outright; insure it with your provider at the correct replacement value.');
+    bullet('Avoid finance charges by purchasing equipment upfront through VoIP Shop.');
+    bullet('Get help from a support-led team focused on uptime, not sales targets.');
 
-  // Bullets (no background fill; we’ll draw the border afterwards)
-  bullet('Buy direct—no sales commissions baked into hardware pricing.');
-  bullet('Own your equipment outright; insure it with your provider at the correct replacement value.');
-  bullet('Avoid finance charges by purchasing equipment upfront through VoIP Shop.');
-  bullet('Get help from a support-led team focused on uptime, not sales targets.');
+    const contentBottom = doc.y + 6;
+    const cardHeight = Math.max(60, contentBottom - cardYStart);
 
-  // Compute final card height based on content drawn
-  const contentBottom = doc.y + 6;
-  const cardHeight = Math.max(60, contentBottom - cardYStart);
-
-  // Draw ONLY a stroked frame around everything (title + 4 bullets)
-  doc.save()
-     .roundedRect(L, cardYStart, W, cardHeight, 10)
-     .strokeColor(line)
-     .lineWidth(1)
-     .stroke()
-     .restore();
-
-  // Advance cursor below card
-  doc.y = cardYStart + cardHeight + 10;
-}
+    doc.save().roundedRect(L, cardYStart, W, cardHeight, 10).strokeColor(line).lineWidth(1).stroke().restore();
+    doc.y = cardYStart + cardHeight + 10;
+  }
 
   // Totals (compute once)
   const vatRate = Number(q.company?.vatRate ?? 0.15);
@@ -185,7 +178,7 @@ if (ensureSpace(90)) {
   const onceTotal = onceSub + onceVat;
   const monTotal  = monSub + monVat;
 
-  // Summary cards (Monthly / Once-off) — clear & no "Pay now"
+  // Summary cards (Monthly / Once-off)
   {
     const yStart = doc.y + 6;
     const gap = 10;
@@ -218,17 +211,35 @@ if (ensureSpace(90)) {
     0
   );
 
-  // ---- TABLE (one page; compact; minutes-aware)
+  // ---- Helper: normalize monthly items & inject Calls row from minutesPackage if needed
+  const synthMonthlyItems = (items = []) => {
+    const arr = Array.isArray(items) ? [...items] : [];
+    const hasCalls = arr.some((it) => {
+      const name = String(it?.name || it?.title || '').toLowerCase();
+      return Boolean(it?.isCalls) || /\bcalls?\b/.test(name) || /min(ute)?s?/.test(name);
+    });
+
+    if (!hasCalls && minutesPackage.has) {
+      arr.push({
+        name: 'Calls',
+        isCalls: true,
+        minutes: Number(minutesPackage.minutes) || 0,
+        bundleSize: Number(minutesPackage.bundleSize) || 250,
+        unit: Number(minutesPackage.unitR) || 100 // R per bundle
+      });
+    }
+    return arr;
+  };
+
+  // ---- TABLE (one page; compact; minutes-aware, aligned with SLA)
   const table = (title, items, subtotalEx, vatAmt, totalInc, monthly = false) => {
     const colW  = [ W * 0.58, W * 0.12, W * 0.12, W * 0.18 ];
     const headH = 14;
-    const rowH  = 16;  // slimmer rows
+    const rowH  = 16;
 
-    // Section title
     if (!ensureSpace(24)) return;
     const titleY = doc.y;
     doc.font('Helvetica-Bold').fontSize(11).fillColor(ink).text(title, L, titleY, { width: W });
-    // >>> FIX: sync local y with doc.y to avoid overlap, and add breathing room
     let y = doc.y + 4;
 
     // Header row
@@ -249,11 +260,10 @@ if (ensureSpace(90)) {
     let rowIndex = 0;
     let hiddenCount = 0;
 
-    const safeGlobalMinutes = Number.isFinite(Number(globalMinutes)) ? Number(globalMinutes) : 0;
-    const itemsArr = Array.isArray(items) ? items : [];
+    const itemsArrBase = Array.isArray(items) ? items : [];
+    const itemsArr = monthly ? synthMonthlyItems(itemsArrBase) : itemsArrBase;
 
     for (let i = 0; i < itemsArr.length; i++) {
-      // Need room for at least a row + totals
       if (!ensureSpace(120, y)) { hiddenCount = itemsArr.length - i; break; }
 
       const it   = itemsArr[i] || {};
@@ -268,7 +278,7 @@ if (ensureSpace(90)) {
         Boolean(it.isCalls) ||
         /(?:^|\b)(?:calls?|minutes?|bundle)\b/i.test(name);
 
-      // Pull minutes from tags first
+      // Gather minutes from typical fields
       const minuteCandidates = [
         it.minutes, it.qtyMinutes, it.minutesIncluded, it.includedMinutes,
         it.qty_min, it.qty_mins, it.qtyMin, it.qtyMins, it.bundleMinutes
@@ -276,7 +286,7 @@ if (ensureSpace(90)) {
       let itemMinutes =
         minuteCandidates.map(n => Number(n)).find(n => Number.isFinite(n) && n > 0) || 0;
 
-      // If still not present, try parsing from the name
+      // If still not present, parse from name
       if (!itemMinutes) {
         const m = name.match(/(\d{2,5})\s*(?:mins?|minutes?)\b/i)
                || name.match(/\bbundle\s*(\d{2,5})\b/i)
@@ -285,56 +295,54 @@ if (ensureSpace(90)) {
       }
 
       // Final minutes value per row
-      const minutesForRow = itemMinutes > 0 ? itemMinutes : (looksLikeCalls ? safeGlobalMinutes : 0);
+      const minutesForRow = itemMinutes > 0
+        ? itemMinutes
+        : (looksLikeCalls
+            ? (Number(minutesPackage.minutes) || Number(globalMinutes) || 0)
+            : 0);
 
-      // Explicit Pay-as-you-go detection → force 0 minutes
-      const isPayg = looksLikeCalls && (
-        /pay[-\s]?as[-\s]?you[-\s]?go/i.test(nameLower) ||
-        Number(minutesForRow) <= 0 ||
-        Number(qtyRaw) <= 0
-      );
+      // PAYG if 0 minutes
+      const isPayg = looksLikeCalls && (Number(minutesForRow) <= 0);
 
-      // For calls with minutes, show minutes as the Qty and "minutes" as Unit
-      const isMinutesBundle = !!(monthly && looksLikeCalls && !isPayg && minutesForRow > 0);
+      // Bundle settings / unitR for calls
+      const bundleSize = looksLikeCalls
+        ? (Number(it.bundleSize) > 0 ? Number(it.bundleSize) : Number(minutesPackage.bundleSize) || 250)
+        : 0;
 
-      // Compute Qty/Unit/Amount
-      const qtyVal = isMinutesBundle
-        ? minutesForRow            // show actual minutes
-        : isPayg
-          ? 0                      // PAYG shows 0 minutes
-          : (Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1);
+      const unitRForBundle = looksLikeCalls
+        ? (Number(unitRaw) > 0 ? Number(unitRaw) : Number(minutesPackage.unitR) || 100)
+        : (Number(unitRaw) > 0 ? Number(unitRaw) : 0);
 
-      const unitDisplay = (isMinutesBundle || isPayg)
-        ? 'minutes'
-        : money(Number.isFinite(unitRaw) ? unitRaw : 0);
+      // Compute Qty / Unit / Amount
+      let qtyVal, unitDisplay, amount, desc;
 
-      // Use bundle calc for minutes-based calls, else qty * unit
-      const bundleSize = Number(it.bundleSize || q?.meta?.bundleSize || 250);
-      const unitForCalc = looksLikeCalls
-        ? (Number.isFinite(unitRaw) && unitRaw > 0 ? unitRaw : 100) // default R100/bundle if missing
-        : (Number.isFinite(unitRaw) ? unitRaw : 0);
-
-      let amount = 0;
-      if (isMinutesBundle) {
-        const bundles = (Number.isFinite(bundleSize) && bundleSize > 0) ? (minutesForRow / bundleSize) : 0;
-        amount = unitForCalc * bundles;
-      } else if (isPayg) {
-        amount = 0; // Pay-as-you-go -> 0 minutes -> R0
+      if (looksLikeCalls) {
+        if (isPayg) {
+          qtyVal = 0;
+          unitDisplay = 'minutes';
+          amount = 0;
+          desc = `${name} — 0 minutes (Pay-as-you-go)`;
+        } else {
+          // show minutes as qty; unit shows Rxxx / {bundleSize}m
+          qtyVal = minutesForRow;
+          unitDisplay = `${money(unitRForBundle)} / ${bundleSize}m`;
+          const bundles = (bundleSize > 0) ? (minutesForRow / bundleSize) : 0;
+          amount = (Number.isFinite(bundles) ? bundles : 0) * unitRForBundle;
+          desc = `${name} — ${minutesForRow} minutes`;
+        }
       } else {
-        amount = unitForCalc * qtyVal;
+        // Non-calls: regular qty × unit
+        qtyVal = Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1;
+        unitDisplay = money(unitRForBundle);
+        amount = unitRForBundle * qtyVal;
+        desc = name;
       }
+
       if (!Number.isFinite(amount)) amount = 0;
 
       // Row bg
       doc.save().rect(L, y, W, rowH).fill(zebra[rowIndex % 2]).restore();
       rowIndex++;
-
-      // Description: append minutes context for calls
-      const desc = looksLikeCalls
-        ? (isPayg
-            ? `${name} — 0 minutes (Pay-as-you-go)`
-            : `${name} — ${minutesForRow} minutes`)
-        : name;
 
       const rowTextY = y + 3;
       doc.text(desc,                L + 8,                       rowTextY, { width: colW[0] - 10 });
@@ -354,7 +362,7 @@ if (ensureSpace(90)) {
       y += rowH;
     }
 
-    // Totals
+    // Totals (use provided subtotals to avoid drift from display rounding)
     if (ensureSpace(52, y)) {
       doc.moveTo(L, y).lineTo(R, y).strokeColor(line).stroke();
       y += 6;
@@ -377,14 +385,13 @@ if (ensureSpace(90)) {
       totalLine(monthly ? 'Total / month' : 'Total (once-off)', totalInc, true);
     }
 
-    // Commit local y
     doc.y = y + 2;
   };
 
   // Stamp (first page only)
   paintStamp(q.stamp);
 
-  // Sections (note the spacing fix is inside table())
+  // Sections
   table('Once-off Charges', q.itemsOnceOff || [], onceSub, onceVat, onceTotal, false);
   doc.moveDown(0.6);
   table('Monthly Charges',  q.itemsMonthly || [], monSub,  monVat,  monTotal,  true);
