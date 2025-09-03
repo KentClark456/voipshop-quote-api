@@ -12,7 +12,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const COMPANY_DEFAULTS = {
   name: 'VoIP Shop',
   address: '23 Lombardy Road, Broadacres, Johannesburg',
-  phone: '+27 67 922 8256',
+  phone: '+27 10 101 4370',
   email: 'sales@voipshop.co.za',
   vatRate: 0.15,
   logoUrl: 'https://voipshop.co.za/Assets/Group%201642logo%20(1).png',

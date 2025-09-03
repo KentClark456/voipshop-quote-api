@@ -78,7 +78,7 @@ export default async function handler(req, res) {
       company: {
         name: 'VoIP Shop',
         address: '23 Lombardy Road, Broadacres, Johannesburg',
-        phone: '+27 67 922 8256',
+        phone: '+27 10 101 4370',
         email: 'sales@voipshop.co.za',
         website: 'https://voipshop.co.za',
         logoUrl: 'https://voipshop.co.za/Assets/Group%201642logo%20(1).png'

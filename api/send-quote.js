@@ -8,7 +8,7 @@ const COMPLETE_ORDER_URL = process.env.COMPLETE_ORDER_URL || 'https://voipshop.c
 const COMPANY_DEFAULTS = {
   name: 'VoIP Shop',
   address: '23 Lombardy Road, Broadacres, Johannesburg',
-  phone: '+27 67 922 8256',
+  phone: '+27 10 101 4370',
   email: 'sales@voipshop.co.za',
   vatRate: 0.15,
   validityDays: 7,
